@@ -7,8 +7,8 @@
 // than by hoping a `use()` sits in the right place.
 
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import type { DB } from './db';
-import { parsePaths } from './db';
 import type { Config } from './config';
 import { isAdmin } from './config';
 import {
@@ -24,8 +24,9 @@ import { check, renderCheck } from './check';
 import { closeFinding, listFindings } from './findings';
 import { handleMcp } from './mcp';
 import { presence, renderPresence } from './presence';
-import { runLuigi, type Summariser } from './luigi';
-import { page, escapeHtml } from './ui';
+import { runLuigiExclusive, type Summariser } from './luigi';
+import { page } from './ui';
+import { ready, status } from './health';
 
 export interface Deps {
   db: DB;
@@ -51,6 +52,21 @@ export function createApp(deps: Deps): Hono<Env> {
     touchToken(db, token!);
     await next();
   });
+
+  // 256 KB is roughly a hundred times the largest legitimate emit (50 items x
+  // 50 paths of ordinary length). Without it a single caller could post 60 MB
+  // into an append-only table, and better-sqlite3 is synchronous, so a full disk
+  // blocks the event loop for everyone.
+  agent.use(
+    '/:token/e',
+    bodyLimit({
+      maxSize: 256 * 1024,
+      // Same fail-soft shape as every other emit rejection — the hook must never
+      // start surfacing errors into an agent's loop.
+      onError: (c) =>
+        c.json({ results: [{ ok: false, skipped: 'empty', reason: 'body too large' }] }),
+    }),
+  );
 
   // Always 200 on a body we could read. An emit that fails must never surface as
   // an error inside an agent's loop and derail whatever it was actually doing —
@@ -130,9 +146,18 @@ export function createApp(deps: Deps): Hono<Env> {
     ),
   );
 
+  // The CLI's `mario close` posts here. It previously targeted this path with no
+  // route registered, so it 404'd — and the only close route lived behind the
+  // browser's CSRF header and Access JWT, neither of which an agent can send.
+  agent.post('/:token/findings/:id/close', async (c) => {
+    const body = await c.req.json<{ note?: string }>().catch(() => ({}) as { note?: string });
+    const r = closeFinding(db, c.req.param('id'), body.note ?? null, Date.now(), c.get('actor'));
+    return r.ok ? c.json({ closed: r.id }) : c.json({ error: r.reason }, 400);
+  });
+
   agent.post('/:token/luigi', async (c) => {
     if (!isAdmin(cfg, c.get('actor'))) return c.json({ error: 'forbidden' }, 403);
-    return c.json({ folded: await runLuigi(db, cfg, deps.summarise) });
+    return c.json({ folded: await runLuigiExclusive(db, cfg, deps.summarise) });
   });
 
   app.route('/a', agent);
@@ -152,7 +177,7 @@ export function createApp(deps: Deps): Hono<Env> {
   api.get('/me', (c) => {
     const actor = c.get('actor');
     const existing = db
-      .query<{ created_at: number }, [string]>(
+      .query<{ created_at: number }>(
         'SELECT created_at FROM tokens WHERE actor = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1',
       )
       .get(actor);
@@ -178,7 +203,7 @@ export function createApp(deps: Deps): Hono<Env> {
 
   api.post('/findings/:id/close', async (c) => {
     const body = await c.req.json<{ note?: string }>().catch(() => ({}) as { note?: string });
-    const r = closeFinding(db, c.req.param('id'), body.note ?? null);
+    const r = closeFinding(db, c.req.param('id'), body.note ?? null, Date.now(), c.get('actor'));
     return r.ok ? c.json({ closed: r.id }) : c.json({ error: r.reason }, 400);
   });
 
@@ -199,11 +224,6 @@ export function createApp(deps: Deps): Hono<Env> {
     });
   });
 
-  api.post('/luigi', async (c) => {
-    if (!isAdmin(cfg, c.get('actor'))) return c.json({ error: 'forbidden' }, 403);
-    return c.json({ folded: await runLuigi(db, cfg, deps.summarise) });
-  });
-
   app.route('/api', api);
 
   // --- pages ----------------------------------------------------------------
@@ -211,6 +231,22 @@ export function createApp(deps: Deps): Hono<Env> {
   app.get('/', (c) => c.html(page('who')));
   app.get('/findings', (c) => c.html(page('findings')));
   app.get('/setup', (c) => c.html(page('setup')));
+
+  // --- probes ---------------------------------------------------------------
+  // Unauthenticated on purpose: a platform probe cannot present an Access JWT.
+  // Externally these sit behind Access like every other non-/a path.
+
+  // Liveness. No database, no config. If the event loop can answer, the process
+  // is alive; anything deeper here causes restart loops.
+  app.get('/healthz', (c) => c.text('ok'));
+
+  app.get('/readyz', (c) => {
+    const r = ready(db);
+    return c.json(r, r.ok ? 200 : 503);
+  });
+
+  // Never wire this to a probe: it reports conditions a restart cannot fix.
+  app.get('/statusz', (c) => c.json(status(db, cfg)));
 
   app.notFound((c) => c.text('not found', 404));
   app.onError((err, c) => {
@@ -220,5 +256,3 @@ export function createApp(deps: Deps): Hono<Env> {
 
   return app;
 }
-
-export { escapeHtml, parsePaths };

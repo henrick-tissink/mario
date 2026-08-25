@@ -28,8 +28,7 @@ export interface Stmt<T> {
 }
 
 export interface DB {
-  /** The second type parameter is accepted for call-site readability only. */
-  query<T = unknown, _P = Binds>(sql: string): Stmt<T>;
+  query<T = unknown>(sql: string): Stmt<T>;
   exec(sql: string): void;
   /** Always `.immediate()` for read-then-write; see `migrate`. */
   transaction(fn: () => void): { immediate(): void };
@@ -75,8 +74,11 @@ function wrap(db: SqliteDB): DB {
  */
 export function open(path = process.env.MARIO_DB ?? 'mario.db'): DB {
   const raw = new Sqlite(path);
-  raw.pragma('journal_mode = WAL'); // persisted in the file
+  // busy_timeout FIRST. Converting a fresh file to WAL needs an exclusive lock,
+  // and with no timeout set it fails instantly rather than waiting — so two
+  // containers starting together against an empty volume both died here.
   pragmas(raw);
+  raw.pragma('journal_mode = WAL'); // persisted in the file
   const db = wrap(raw);
   migrate(db);
   return db;
@@ -98,18 +100,23 @@ export function migrate(db: DB): string[] {
     name TEXT PRIMARY KEY,
     applied_at INTEGER NOT NULL
   )`);
-  const done = new Set(db.query<{ name: string }>('SELECT name FROM migrations').all().map((r) => r.name));
   const applied: string[] = [];
   for (const m of MIGRATIONS) {
-    if (done.has(m.name)) continue;
-    // `.immediate()`, never a bare transaction: SQLite's default BEGIN is
-    // DEFERRED, under which a second connection can interleave a write between
-    // a read and the write that depends on it.
+    // The applied-set is read INSIDE the transaction that writes it.
+    //
+    // Reading it outside was a time-of-check/time-of-use race: `.immediate()`
+    // protects the write but not a decision made before the transaction began,
+    // so two processes starting together both saw an empty set and the loser
+    // re-ran `schema.sql` — which uses bare CREATE TABLE and threw.
     db.transaction(() => {
+      const done = db
+        .query<{ n: number }>('SELECT COUNT(*) AS n FROM migrations WHERE name = ?')
+        .get(m.name);
+      if (done && done.n > 0) return;
       db.exec(m.sql());
       db.query('INSERT INTO migrations (name, applied_at) VALUES (?, ?)').run(m.name, Date.now());
+      applied.push(m.name);
     }).immediate();
-    applied.push(m.name);
   }
   return applied;
 }
@@ -121,16 +128,6 @@ export function openMemory(): DB {
   const db = wrap(raw);
   migrate(db);
   return db;
-}
-
-/**
- * SQLITE_BUSY_SNAPSHOT cannot be waited out — busy_timeout returns it in 0ms.
- * It only arises from a deferred read-then-write, so `.immediate()` avoids it;
- * this is the backstop for anything that slips through.
- */
-export function isRetryableBusy(err: unknown): boolean {
-  const code = (err as { code?: string })?.code ?? '';
-  return code === 'SQLITE_BUSY_SNAPSHOT' || code === 'SQLITE_BUSY';
 }
 
 // --- JSON path columns ------------------------------------------------------

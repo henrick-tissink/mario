@@ -125,3 +125,36 @@ test('pages render', async () => {
     expect(await r.text()).toContain('</html>');
   }
 });
+
+test('the probes answer without auth and report posture', async () => {
+  expect((await app.request('/healthz')).status).toBe(200);
+  expect((await app.request('/readyz')).status).toBe(200);
+  const s = (await (await app.request('/statusz')).json()) as any;
+  // devActor is set in this suite, so posture must say so rather than look well.
+  expect(s.config.dev_actor_set).toBe(true);
+  expect(s.warnings.join(' ')).toContain('MARIO_DEV_ACTOR');
+  expect(s.ok).toBe(false);
+  expect(typeof s.size.paths_bytes).toBe('number');
+});
+
+test('an oversized emit body is rejected fail-soft, not with an error status', async () => {
+  const huge = JSON.stringify([{ kind: 'done', summary: 'x'.repeat(400_000), repo: REPO }]);
+  const r = await app.request(`/a/${token}/e`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: huge,
+  });
+  expect(r.status).toBe(200);            // never derail an agent's loop
+  const body = (await r.json()) as any;
+  expect(body.results[0].ok).toBe(false);
+  expect(db.query('SELECT * FROM events').all().length).toBe(0);
+});
+
+test('mario close reaches a real route on the agent surface', async () => {
+  await post(`/a/${token}/e`, { kind: 'finding', summary: 'a real defect', repo: REPO });
+  const id = (db.query<{ id: string }>('SELECT id FROM findings').get())!.id;
+  const r = await post(`/a/${token}/findings/${id.slice(0, 8)}/close`, { note: 'fixed' });
+  expect(r.status).toBe(200);
+  const f = db.query<{ status: string; closed_by: string }>(
+    'SELECT status, closed_by FROM findings').get()!;
+  expect(f.status).toBe('closed');
+  expect(f.closed_by).toBe('henry@x.co');   // who closed it is recorded
+});

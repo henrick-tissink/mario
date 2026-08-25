@@ -22,7 +22,7 @@ test('reports live presence with areas grouped under their project', () => {
   const p = presence(db, cfg, 48);
   expect(p.people.length).toBe(1);
   const projects = p.people[0]!.projects.map((x) => x.project).sort();
-  expect(projects).toEqual(['acme-atlas', 'acme-widgets']);
+  expect(projects).toEqual(['gitlab-acme-atlas', 'gitlab-acme-widgets']);
   // src/worker/ exists in most repos — an area without its project says nothing.
   for (const pr of p.people[0]!.projects) expect(pr.areas.length).toBeGreaterThan(0);
 });
@@ -64,9 +64,9 @@ test('a path containing a pipe does not corrupt anyone else', () => {
 test('folds and open findings are reported for liveness', () => {
   emit(db, cfg, 'h@x.co', { kind: 'finding', summary: 'broken', repo: A }, NOW);
   db.query('INSERT OR IGNORE INTO projects (slug,name,created_at) VALUES (?,?,?)')
-    .run('acme-widgets', 'widgets', NOW);
+    .run('gitlab-acme-widgets', 'widgets', NOW);
   db.query('INSERT INTO state (project,doc,folded_thru,updated_at) VALUES (?,?,?,?)')
-    .run('acme-widgets', 'doc', NOW, NOW);
+    .run('gitlab-acme-widgets', 'doc', NOW, NOW);
   const p = presence(db, cfg, 48);
   expect(p.openFindings).toBe(1);
   expect(p.folds.length).toBe(1);
@@ -83,6 +83,6 @@ test('renders a readable report, including the empty case', () => {
   emit(db, cfg, 'henry@x.co', { kind: 'touch', session: 's', repo: A, paths: ['src/p/a.ts'] }, NOW);
   const out = renderPresence(presence(db, cfg, 48), NOW);
   expect(out).toContain('henry');
-  expect(out).toContain('acme-widgets: src/p/');
+  expect(out).toContain('gitlab-acme-widgets: src/p/');
   expect(out).toContain('0 open findings');
 });

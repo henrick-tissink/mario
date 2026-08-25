@@ -131,7 +131,7 @@ describe('scoping', () => {
     emit(db, { ...cfg, allow: ['gitlab.com/acme', 'github.com/acme-labs'] }, 'x@x.co',
       { kind: 'touch', session: 's', repo: OTHER, paths: ['secret.ts'] });
     // acme-labs is no longer in this caller's allow-list.
-    const r = check(db, cfg, 'me@x.co', { project: 'acme-labs-x' });
+    const r = check(db, cfg, 'me@x.co', { project: 'github-acme-labs-x' });
     expect(r.collisions.length).toBe(0);
     expect(r.skipped).toBe('out-of-scope');
   });
@@ -149,9 +149,57 @@ describe('scoping', () => {
 test('renderCheck says clear, with the state headline when there is one', () => {
   const r = check(db, cfg, 'me@x.co', { repo: REPO });
   expect(renderCheck(r)).toBe('clear');
-  db.query('INSERT OR IGNORE INTO projects (slug,name,created_at) VALUES (?,?,?)').run('acme-widgets','c',1);
+  db.query('INSERT OR IGNORE INTO projects (slug,name,created_at) VALUES (?,?,?)').run('gitlab-acme-widgets','c',1);
   db.query('INSERT INTO state (project,doc,folded_thru,updated_at) VALUES (?,?,?,?)')
-    .run('acme-widgets', 'Pricing rewrite in progress.\nmore detail', 1, 1);
+    .run('gitlab-acme-widgets', 'Pricing rewrite in progress.\nmore detail', 1, 1);
   const r2 = check(db, cfg, 'me@x.co', { repo: REPO });
   expect(renderCheck(r2)).toBe('clear\n(state: Pricing rewrite in progress.)');
+});
+
+// --- regressions -----------------------------------------------------------
+
+describe('one person, several sessions', () => {
+  test('a second session does not erase the first', () => {
+    // The PK is (actor, session, project). Two terminals, two worktrees, or a
+    // subagent all produce several live rows for one person. GROUP BY actor kept
+    // exactly one, so the file someone was actually editing went invisible the
+    // moment their other session touched anything newer — and check answered
+    // `clear`. A confident false negative on the only question that matters.
+    touch('henry@x.co', ['src/pricing/refunds.ts'], 'A');
+    touch('henry@x.co', ['README.md'], 'B');
+    const r = check(db, cfg, 'me@x.co', { repo: REPO, paths: ['src/pricing/refunds.ts'] });
+    expect(r.collisions[0]?.heat).toBe('hot');
+    expect(renderCheck(r)).toContain('src/pricing/refunds.ts');
+  });
+
+  test('paths from every session are merged, still one line per person', () => {
+    touch('henry@x.co', ['src/a/one.ts'], 'A');
+    touch('henry@x.co', ['src/a/two.ts'], 'B');
+    touch('henry@x.co', ['src/a/three.ts'], 'C');
+    const r = check(db, cfg, 'me@x.co', { repo: REPO, paths: ['src/a/mine.ts'] });
+    expect(r.collisions.length).toBe(1);
+    expect(r.collisions[0]!.files.sort()).toEqual([
+      'src/a/one.ts', 'src/a/three.ts', 'src/a/two.ts',
+    ]);
+  });
+
+  test('a branch on any session survives a newer session without one', () => {
+    emit(db, cfg, 'henry@x.co', {
+      kind: 'claim', session: 'A', repo: REPO, branch: 'fix/rounding', summary: 'refunds',
+    });
+    touch('henry@x.co', ['src/p/b.ts'], 'B');
+    const r = check(db, cfg, 'me@x.co', { repo: REPO });
+    expect(r.collisions[0]!.branch).toBe('fix/rounding');
+  });
+});
+
+test('an in-scope repo does not launder an out-of-scope project', () => {
+  // The reachability check used to sit inside `else if (!repo)`, so supplying
+  // any in-scope repo alongside another team's project name walked past the
+  // allow-list entirely.
+  emit(db, { ...cfg, allow: ['gitlab.com/acme', 'gitlab.com/secret'] }, 'x@x.co',
+    { kind: 'touch', session: 's', repo: 'git@gitlab.com:secret/nuclear.git', paths: ['launch.ts'] });
+  const r = check(db, cfg, 'me@x.co', { repo: REPO, project: 'gitlab-secret-nuclear' });
+  expect(r.skipped).toBe('out-of-scope');
+  expect(r.collisions.length).toBe(0);
 });

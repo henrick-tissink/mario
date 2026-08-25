@@ -9,7 +9,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { DB } from './db';
-import { parsePaths, serialisePaths } from './db';
+import { serialisePaths } from './db';
 import type { Config } from './config';
 import { oneLine } from './config';
 import { defaultProject, inScope, normaliseRepo, type Repo } from './repo';
@@ -30,6 +30,9 @@ export type EmitResult =
   | { ok: true; kind: EmitKind; project: string; id?: string; merged: boolean; seen?: number }
   | { ok: false; skipped: 'out-of-scope' | 'no-repo' | 'empty'; reason: string };
 
+/** A path is a filesystem path. Anything longer is a blob you keep forever. */
+const MAX_PATH = 512;
+
 const KINDS: readonly EmitKind[] = ['touch', 'claim', 'done', 'finding'];
 export const isEmitKind = (k: unknown): k is EmitKind =>
   typeof k === 'string' && (KINDS as readonly string[]).includes(k);
@@ -40,19 +43,27 @@ export const isEmitKind = (k: unknown): k is EmitKind =>
  * five slightly different ways must collide, or the list dies of noise.
  */
 export function dedupeKey(project: string, summary: string): string {
+  // Unicode-aware. `[^a-z0-9 ]` stripped Chinese, Arabic, Cyrillic, Japanese and
+  // emoji to the empty string, so every non-ASCII finding in a project hashed
+  // identically and merged into whichever arrived first — its text discarded.
+  // camelCase and snake_case are split so `parseUser` and `parse_user` collide,
+  // which is the point of normalising at all.
   const norm = summary
+    .normalize('NFKD')
+    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
     .toLowerCase()
-    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 160);
-  return createHash('sha256').update(`${project} ${norm}`).digest('hex');
+    .trim();
+  // The WHOLE normalised summary, not a prefix. Truncating at 160 chars meant
+  // two findings sharing a long prefix were the same finding.
+  return createHash('sha256').update(`${project}\u0000${norm}`).digest('hex');
 }
 
 /** Resolve a repo to a project, registering it on first sight. */
 export function projectFor(db: DB, repo: Repo, now = Date.now()): string {
   const existing = db
-    .query<{ project: string }, [string]>('SELECT project FROM repos WHERE repo = ?')
+    .query<{ project: string }>('SELECT project FROM repos WHERE repo = ?')
     .get(repo);
   if (existing) return existing.project;
 
@@ -73,7 +84,7 @@ export function projectFor(db: DB, repo: Repo, now = Date.now()): string {
     );
   }).immediate();
   return (
-    db.query<{ project: string }, [string]>('SELECT project FROM repos WHERE repo = ?').get(repo)
+    db.query<{ project: string }>('SELECT project FROM repos WHERE repo = ?').get(repo)
       ?.project ?? slug
   );
 }
@@ -95,10 +106,18 @@ export function emit(
   }
 
   const project = projectFor(db, repo, now);
-  const paths = (input.paths ?? []).filter(Boolean).slice(-50);
+  // Length capped here; COUNT capped by serialisePaths, which dedupes first.
+  // Slicing to 50 before dedupe meant 60 repeats of one file evicted 50 distinct
+  // ones. Element length was never capped at all, so a path could be megabytes
+  // — in an append-only table, re-read on every check and re-parsed on every
+  // touch.
+  const paths = (input.paths ?? []).filter(Boolean).map((p) => String(p).slice(0, MAX_PATH));
+  // EVERY caller-supplied string that can reach another agent's context goes
+  // through oneLine, not just `summary`. Branch names are attacker-controlled
+  // and were previously stored raw.
   const summary = oneLine(input.summary, cfg.maxSummary);
-  const agent = input.agent ?? null;
-  const branch = input.branch ?? null;
+  const agent = input.agent === 'claude' || input.agent === 'codex' ? input.agent : null;
+  const branch = oneLine(input.branch, 200);
 
   switch (input.kind) {
     case 'touch':
@@ -107,11 +126,15 @@ export function emit(
       // collapse against, so it degrades to an event rather than inventing a key.
       if (!input.session) {
         if (input.kind === 'claim' && summary) break; // fall through to the event insert
-        return { ok: false, skipped: 'empty', reason: 'touch requires a session' };
+        return {
+          ok: false,
+          skipped: 'empty',
+          reason: `${input.kind} requires a session`,
+        };
       }
       const merged = upsertPresence(db, {
         actor,
-        session: input.session,
+        session: String(input.session).slice(0, 200),
         project,
         repo,
         branch,
@@ -298,12 +321,19 @@ function upsertFinding(
             closed_at  = NULL,
             close_note = NULL,
             paths      = (
+              -- Most recent 50, newest-first priority, then back into order.
+              -- A bare DISTINCT ... LIMIT 50 returned the OLD rows first, so a
+              -- re-report's paths were dropped — exactly the bug the comment
+              -- above claims to prevent.
               SELECT json_group_array(value) FROM (
-                SELECT DISTINCT value FROM (
-                  SELECT value FROM json_each(findings.paths)
-                  UNION ALL
-                  SELECT value FROM json_each(excluded.paths)
-                ) LIMIT 50
+                SELECT value, ord FROM (
+                  SELECT value, MAX(ord) AS ord FROM (
+                    SELECT value, key AS ord FROM json_each(findings.paths)
+                    UNION ALL
+                    SELECT value, 1000000 + key AS ord FROM json_each(excluded.paths)
+                  ) GROUP BY value
+                  ORDER BY ord DESC LIMIT 50
+                ) ORDER BY ord ASC
               )
             )
        RETURNING id, seen_count`,
@@ -330,5 +360,3 @@ function upsertFinding(
     seen: row?.seen_count ?? 1,
   };
 }
-
-export { parsePaths };

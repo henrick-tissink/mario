@@ -38,9 +38,23 @@ unrelated codebases. Identity now spans owner and name.
 `LIKE '%'` and closed every finding in the database, reporting success. Now: a minimum length, an
 escaped LIKE, a match-count check, and a status guard.
 
-**The fold.** The old fold read `LIMIT 500` but stamped everything older than the cutoff,
-so surplus events were marked consumed without ever reaching the model. Luigi stamps bounded by
-`folded_thru` — the maximum timestamp it actually read.
+**The fold.** The old fold read `LIMIT 500` but stamped everything older than the cutoff, so surplus
+events were marked consumed without ever reaching the model. Luigi stamps **by row id** — exactly the
+rows it read. Bounding by a timestamp, even the maximum one actually read, is *not* the same thing
+and was itself a bug: events sharing the boundary millisecond (routine, since a batched emit puts 50
+items in one millisecond) and `worked` rows a concurrent sweep inserts during the model call both fall
+inside a time bound without ever reaching the model. Identity has no such edge.
+
+**Presence, part two.** `GROUP BY actor` kept one row per person, but the primary key is
+`(actor, session, project)` — two terminals or a subagent give one person several. The file someone
+was actually editing went invisible the moment their other session touched anything newer, and
+`check` answered `clear`. Rows are merged per actor in JS instead.
+
+**Reaching other people's agents.** Everything a caller sends that can reach another developer's
+agent context — summary, branch, session, and every path — is squeezed to one line with control,
+zero-width and bidi characters stripped, at the emit boundary *and* again at render. The block the
+SessionStart hook injects is fenced and labelled as data. Only `summary` used to be treated this way,
+so a branch name carried newlines straight into every teammate's context.
 
 **Escaping.** One field was escaped; repo paths, project and actor names went into `innerHTML`
 raw, all from agent-supplied payloads, on a page served from the same origin as the endpoint-minting
@@ -61,6 +75,12 @@ concatenation to forget.
 - **Scope is an allow-list enforced on both ends**, failing closed when unconfigured.
 - **Repo is a property of the file, not the session.**
 - **No per-person aggregates.** Not a gap; a constraint that keeps the data honest.
+- **A fold is not re-entrant.** Four call sites can start one; `runLuigiExclusive` joins an in-flight
+  run rather than racing it. Two concurrent folds both pay for a model call and the loser's document
+  is overwritten while its events stay stamped consumed.
+- **Misconfiguration is fatal, not a warning.** `preflight` exits 78 when the service would run
+  indefinitely and record nothing. The failure this prevents is not a crash — it is a process that
+  looks healthy for weeks.
 
 ## Deliberate non-features
 

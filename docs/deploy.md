@@ -58,14 +58,21 @@ The platform used to provide these. Now you do. Ordered by what actually bites.
 
 **Before cutover**
 
+0. **Build the image and run the suite.** `docker build .`; `npm test` (149 tests). The Dockerfile
+   needs no compiler — better-sqlite3 ships prebuilds — so a compile during `npm ci` means prebuild
+   resolution broke and is worth investigating rather than papering over with a toolchain.
 1. **The SessionStart hook fails open.** Already implemented: a 250ms timeout
    (`MARIO_HOOK_TIMEOUT_MS`), and any timeout or error prints nothing and lets the turn proceed.
    Measured at 59ms against an unreachable server. This is what stops one unwell box from becoming a
    company-wide stop-work event, and it is the reason the single-box design is defensible at all.
-2. **Firewall: deny all inbound except SSH.** A Tunnel is outbound-only, but the box still has a
+2. **Deliberately break it before trusting it.** Start with `MARIO_ALLOWED_REPOS` unset and confirm
+   **exit 78**; start with `MARIO_DEV_ACTOR` plus `NODE_ENV=production` and confirm exit 78. Those two
+   checks are what prove the silent-misconfiguration class is closed. Then `curl /statusz` and require
+   `warnings: []` — the cutover gate is that, not "the page loads".
+3. **Firewall: deny all inbound except SSH.** A Tunnel is outbound-only, but the box still has a
    public IP and Coolify's Traefik binds :80/:443. Verify from an external host that both fail —
    and check Docker's iptables rules have not punched through a naive `ufw` config.
-3. **Every public hostname on the tunnel has an Access application, or is deliberately public.** No
+4. **Every public hostname on the tunnel has an Access application, or is deliberately public.** No
    orphans. Access is per-hostname.
 
 **First week**
@@ -98,7 +105,7 @@ was days old with its flagship regression in the test runner. A use-after-free i
 is a crash loop, and a crash loop sits in front of every developer's turn.
 
 Nothing was given up in the move. The capabilities that mattered were SQLite's, not the runtime's:
-partial unique indexes, upserts with correct `RETURNING`, `json_each` prefix filters, real interactive
+upserts with correct `RETURNING`, `json_each` prefix filters, real interactive
 transactions. The test loop is unchanged in practice (~0.6s for the full suite), the schema and every
 query are identical, and `src/db.ts` is still the only file that names a driver.
 

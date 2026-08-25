@@ -4,7 +4,7 @@ import { openMemory, migrate, likePrefix, parsePaths, serialisePaths } from '../
 test('schema applies and is idempotent', () => {
   const db = openMemory();
   expect(migrate(db)).toEqual([]); // already applied
-  const tables = db.query<{ name: string }, []>(
+  const tables = db.query<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
   ).all().map((r) => r.name);
   expect(tables).toContain('presence');
@@ -20,7 +20,7 @@ test('presence upsert is atomic on the composite key', () => {
     ON CONFLICT(actor,session,project) DO UPDATE SET paths=excluded.paths, ts=excluded.ts`);
   up.run('a', 's', 'p', '["x"]', 1, 1);
   up.run('a', 's', 'p', '["y"]', 2, 2);
-  const rows = db.query<{ paths: string; ts: number }, []>('SELECT paths, ts FROM presence').all();
+  const rows = db.query<{ paths: string; ts: number }>('SELECT paths, ts FROM presence').all();
   expect(rows.length).toBe(1);
   expect(rows[0]!.paths).toBe('["y"]');
 });

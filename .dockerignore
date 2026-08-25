@@ -1,0 +1,32 @@
+# Without this the host-arch build context ships into the image and invalidates
+# the npm ci layer on every source edit.
+node_modules
+npm-debug.log*
+
+.git
+.github
+.gitignore
+
+# A local database holds live endpoint hashes and the whole team's activity.
+# It must never be baked into an image.
+*.db
+*.db-wal
+*.db-shm
+
+.env
+.env.*
+!.env.example
+
+test
+coverage
+dist
+docs
+README.md
+install.sh
+cli
+ops
+*.log
+.DS_Store
+Dockerfile
+.dockerignore
+vitest.config.ts

@@ -5,11 +5,13 @@
 //   1. It is a FOLD, not a window summary. Input is the prior document plus new
 //      events. Summarising only the last window would give the system amnesia on
 //      a fixed cycle.
-//   2. It stamps EXACTLY the events it summarised. The system this replaces
-//      selected `LIMIT 500` but stamped everything older than the cutoff, so on a
-//      busy project the surplus was marked consumed without ever reaching the
-//      model — destroyed, unread, silently. Here the stamp is bounded by
-//      `folded_thru`, the maximum timestamp actually fed in.
+//   2. It stamps EXACTLY the events it summarised, BY ID. Bounding the stamp by
+//      a timestamp — even the maximum one actually read — is not the same thing,
+//      and the difference destroys history: events sharing the boundary
+//      millisecond, and `worked` rows a concurrent sweep inserts during the model
+//      call, both fall inside the bound without ever reaching the model.
+//   3. A fold is not re-entrant, and one project's failure must not abort the
+//      rest of the run. See `runLuigiExclusive` and the per-project try.
 
 import Anthropic from '@anthropic-ai/sdk';
 import { randomUUID } from 'node:crypto';
@@ -19,6 +21,7 @@ import type { Config } from './config';
 import { ago } from './repo';
 
 export interface FoldEvent {
+  id: string;
   actor: string;
   agent: string | null;
   branch: string | null;
@@ -48,8 +51,7 @@ export function sweepPresence(db: DB, cfg: Config, now = Date.now()): number {
   let swept = 0;
   db.transaction(() => {
     const stale = db
-      .query<
-        {
+      .query<{
           actor: string;
           session: string;
           project: string;
@@ -59,9 +61,7 @@ export function sweepPresence(db: DB, cfg: Config, now = Date.now()): number {
           paths: string;
           note: string | null;
           ts: number;
-        },
-        [number]
-      >('SELECT * FROM presence WHERE ts <= ?')
+        }>('SELECT * FROM presence WHERE ts <= ?')
       .all(cutoff);
 
     const ins = db.query(
@@ -172,17 +172,16 @@ export async function runLuigi(
   sweepPresence(db, cfg, now);
 
   const projects = db
-    .query<{ project: string }, []>(
-      `SELECT DISTINCT project FROM events WHERE folded_at IS NULL`,
-    )
+    .query<{ project: string }>(`SELECT DISTINCT project FROM events WHERE folded_at IS NULL`)
     .all();
 
   const out: FoldOutcome[] = [];
 
   for (const { project } of projects) {
+    // `id` is selected because the stamp is by identity, not by time — see below.
     const events = db
-      .query<FoldEvent, [string, number]>(
-        `SELECT actor, agent, branch, kind, summary, paths, ts
+      .query<FoldEvent>(
+        `SELECT id, actor, agent, branch, kind, summary, paths, ts
            FROM events
           WHERE project = ? AND folded_at IS NULL
           ORDER BY ts ASC LIMIT ?`,
@@ -190,59 +189,100 @@ export async function runLuigi(
       .all(project, cfg.maxFoldEvents);
     if (!events.length) continue;
 
-    // Bounded by what was actually read, never by a time range. This single line
-    // is the fix for the worst defect in the previous system.
     const foldedThru = events[events.length - 1]!.ts;
 
-    const prior =
-      db.query<{ doc: string }, [string]>('SELECT doc FROM state WHERE project = ?').get(project)
-        ?.doc ?? null;
-    const open =
-      db
-        .query<{ n: number }, [string]>(
-          `SELECT COUNT(*) AS n FROM findings WHERE project = ? AND status = 'open'`,
-        )
-        .get(project)?.n ?? 0;
-
-    let doc: string;
+    // Everything for one project, inside one try. Only `summarise` used to be
+    // guarded, so any per-project WRITE failure threw out of the whole run and
+    // every project later in the loop was skipped — permanently, on every
+    // subsequent run. One misconfigured project could kill the fold for the
+    // entire deployment.
     try {
-      doc = await summarise(
-        buildPrompt(project, prior, events, open, cfg.stateMaxLines, now),
-      );
+      const prior =
+        db.query<{ doc: string }>('SELECT doc FROM state WHERE project = ?').get(project)?.doc ??
+        null;
+      const open =
+        db
+          .query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM findings WHERE project = ? AND status = 'open'`,
+          )
+          .get(project)?.n ?? 0;
+
+      let doc: string;
+      try {
+        doc = await summarise(buildPrompt(project, prior, events, open, cfg.stateMaxLines, now));
+      } catch (err) {
+        // A failed fold stamps nothing. Persisting a truncated or invented
+        // document AND consuming the events behind it is the one unrecoverable
+        // failure here.
+        console.error(`luigi: fold failed for ${project}:`, err);
+        out.push({ project, events: events.length, foldedThru, status: 'failed' });
+        continue;
+      }
+
+      if (!doc.trim()) {
+        // Logged, not silent: an empty generation must not look like a project
+        // that simply had nothing to fold.
+        console.warn(`luigi: empty document for ${project}, nothing stamped`);
+        out.push({ project, events: events.length, foldedThru, status: 'empty' });
+        continue;
+      }
+
+      // The cap is enforced here as well as in the prompt: a model that ignores
+      // the instruction must not be able to grow the document nobody then reads.
+      const capped = doc.split('\n').slice(0, cfg.stateMaxLines).join('\n');
+      const ids = events.map((e) => e.id);
+
+      db.transaction(() => {
+        db.query(
+          `INSERT OR IGNORE INTO projects (slug, name, created_at) VALUES (?, ?, ?)`,
+        ).run(project, project, now);
+        db.query(
+          `INSERT INTO state (project, doc, folded_thru, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(project) DO UPDATE SET
+             doc = excluded.doc, folded_thru = excluded.folded_thru,
+             updated_at = excluded.updated_at`,
+        ).run(project, capped, foldedThru, now);
+        // Stamp EXACTLY the rows that were read, by id.
+        //
+        // Bounding by `ts <= foldedThru` looked equivalent and was not. Events
+        // sharing the boundary timestamp — trivial, since a batched emit puts 50
+        // items in one millisecond — were stamped without ever reaching the
+        // model. So were `worked` rows a concurrent sweep inserted during the
+        // model call, which carry the presence row's OLD ts and so are always
+        // below the bound. Both destroyed history silently. Identity has no
+        // such edge.
+        const stamp = db.query(`UPDATE events SET folded_at = ? WHERE id = ? AND folded_at IS NULL`);
+        for (const id of ids) stamp.run(now, id);
+      }).immediate();
+
+      out.push({ project, events: events.length, foldedThru, status: 'folded' });
     } catch (err) {
-      // A failed fold stamps nothing. Persisting a truncated or invented document
-      // AND consuming the events behind it is the one unrecoverable failure here.
-      console.error(`luigi: fold failed for ${project}:`, err);
+      console.error(`luigi: could not fold ${project}, continuing:`, err);
       out.push({ project, events: events.length, foldedThru, status: 'failed' });
-      continue;
     }
-
-    if (!doc.trim()) {
-      // Logged, not silent: an empty generation must not look like a project
-      // that simply had nothing to fold.
-      console.warn(`luigi: empty document for ${project}, nothing stamped`);
-      out.push({ project, events: events.length, foldedThru, status: 'empty' });
-      continue;
-    }
-
-    // The cap is enforced here as well as in the prompt: a model that ignores
-    // the instruction must not be able to grow the document nobody then reads.
-    const capped = doc.split('\n').slice(0, cfg.stateMaxLines).join('\n');
-
-    db.transaction(() => {
-      db.query(
-        `INSERT INTO state (project, doc, folded_thru, updated_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(project) DO UPDATE SET
-           doc = excluded.doc, folded_thru = excluded.folded_thru, updated_at = excluded.updated_at`,
-      ).run(project, capped, foldedThru, now);
-      db.query(
-        `UPDATE events SET folded_at = ?
-          WHERE project = ? AND folded_at IS NULL AND ts <= ?`,
-      ).run(now, project, foldedThru);
-    }).immediate();
-
-    out.push({ project, events: events.length, foldedThru, status: 'folded' });
   }
 
   return out;
+}
+
+// A fold is not re-entrant. Four call sites can start one — the 4h interval, the
+// startup timer, and both admin routes — and two concurrent runs read the same
+// unfolded events, both pay for a model call, and the loser's document is
+// overwritten while its events stay stamped as consumed.
+let inFlight: Promise<FoldOutcome[]> | null = null;
+
+export function runLuigiExclusive(
+  db: DB,
+  cfg: Config,
+  summarise: Summariser,
+  now = Date.now(),
+): Promise<FoldOutcome[]> {
+  if (inFlight) {
+    console.log('luigi: fold already running, joining it');
+    return inFlight;
+  }
+  inFlight = runLuigi(db, cfg, summarise, now).finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
 }

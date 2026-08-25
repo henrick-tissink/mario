@@ -12,6 +12,7 @@ export interface Finding {
   seen_count: number;
   status: string;
   close_note: string | null;
+  closed_by: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -41,8 +42,8 @@ export function listFindings(
   args.push(limit);
 
   return db
-    .query<Finding, any[]>(
-      `SELECT id, project, summary, paths, seen_count, status, close_note, created_at, updated_at
+    .query<Finding>(
+      `SELECT id, project, summary, paths, seen_count, status, close_note, closed_by, created_at, updated_at
          FROM findings
         WHERE ${where.join(' AND ')}
         ORDER BY seen_count DESC, updated_at DESC
@@ -73,12 +74,13 @@ export function closeFinding(
   id: string,
   note: string | null = null,
   now = Date.now(),
+  actor: string | null = null,
 ): CloseResult {
   const raw = (id ?? '').trim();
   if (raw.length < MIN_ID) return { ok: false, reason: 'too-short' };
 
   const matches = db
-    .query<{ id: string; summary: string; status: string }, [string]>(
+    .query<{ id: string; summary: string; status: string }>(
       `SELECT id, summary, status FROM findings WHERE id LIKE ? ESCAPE '\\' LIMIT 2`,
     )
     .all(likePrefix(raw));
@@ -88,10 +90,17 @@ export function closeFinding(
   const found = matches[0]!;
   if (found.status === 'closed') return { ok: false, reason: 'already-closed' };
 
-  db.query(
-    `UPDATE findings SET status = 'closed', closed_at = ?, close_note = ?, updated_at = ?
-      WHERE id = ? AND status = 'open'`,
-  ).run(now, note, now, found.id);
+  // `changes` is checked: another agent can close the same finding between the
+  // SELECT above and this UPDATE, and reporting success would silently discard
+  // the loser's note.
+  const res = db
+    .query(
+      `UPDATE findings SET status = 'closed', closed_at = ?, close_note = ?, closed_by = ?,
+              updated_at = ?
+        WHERE id = ? AND status = 'open'`,
+    )
+    .run(now, note, actor, now, found.id);
+  if (res.changes === 0) return { ok: false, reason: 'already-closed' };
 
   return { ok: true, id: found.id, summary: found.summary };
 }

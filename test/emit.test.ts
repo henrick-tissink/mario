@@ -22,7 +22,7 @@ beforeEach(() => {
   db = openMemory();
 });
 
-const rows = <T>(sql: string): T[] => db.query<T, []>(sql).all();
+const rows = <T>(sql: string): T[] => db.query<T>(sql).all();
 
 describe('scoping', () => {
   test('an out-of-scope repo writes nothing and says why', () => {

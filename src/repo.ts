@@ -63,7 +63,7 @@ export function normaliseRepo(remote: string | null | undefined): Repo | null {
  * on the server (which is central policy). Both fail closed, so drift between
  * them can only ever mean fewer events.
  */
-export function inScope(repo: Repo | null, allow: readonly string[]): boolean {
+export function inScope(repo: string | null | undefined, allow: readonly string[]): boolean {
   if (!repo) return false;
   const prefixes = allow.map((p) => p.trim().toLowerCase().replace(/\/+$/, '')).filter(Boolean);
   if (!prefixes.length) return false; // unconfigured means closed, not open
@@ -80,8 +80,14 @@ export function inScope(repo: Repo | null, allow: readonly string[]): boolean {
  * product cannot afford, identity now spans owner and name.
  */
 export function defaultProject(repo: Repo): string {
-  const [, ...path] = repo.split('/');
-  const parts = path.length >= 2 ? [path[0]!, path[path.length - 1]!] : path;
+  // Host included. Widening identity from "last segment" to "owner + name" was
+  // not enough: github.com/acme/api and gitlab.com/acme/api still collapsed
+  // into one project. Identity has to be total, because a false collision
+  // between unrelated codebases is the one failure this product cannot afford.
+  const [host, ...path] = repo.split('/');
+  const forge = (host ?? '').split('.')[0] ?? '';
+  const owner = path.length >= 2 ? [path[0]!, path[path.length - 1]!] : path;
+  const parts = [forge, ...owner];
   const slug = parts
     .join('-')
     .replace(/[^a-z0-9]+/g, '-')

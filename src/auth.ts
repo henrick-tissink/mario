@@ -11,7 +11,7 @@
 // endpoint must never be shared: it does not fail, it silently attributes the
 // sharer's work to the person it was minted for.
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { DB } from './db';
 import type { Config } from './config';
@@ -47,7 +47,7 @@ export function revokeAllFor(db: DB, actor: string, now = Date.now()): number {
 export function resolveToken(db: DB, token: string): string | null {
   if (!token) return null;
   const row = db
-    .query<{ actor: string }, [string]>(
+    .query<{ actor: string }>(
       'SELECT actor FROM tokens WHERE hash = ? AND revoked_at IS NULL',
     )
     .get(hashToken(token));
@@ -61,13 +61,6 @@ export function touchToken(db: DB, token: string, now = Date.now()): void {
   } catch {
     /* never let bookkeeping fail a request */
   }
-}
-
-export function constantTimeEquals(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
 }
 
 // --- Cloudflare Access ------------------------------------------------------
@@ -103,11 +96,18 @@ export async function verifyAccess(cfg: Config, jwt: string): Promise<string | n
     const { payload } = await jwtVerify(jwt, jwksFor(cfg.accessTeamDomain), {
       issuer: `https://${cfg.accessTeamDomain}`,
       audience: cfg.accessAud,
+      // Pinned rather than left to library defaults. jose rejects `none` and
+      // HS-with-a-public-key on its own, but algorithm confusion is not a thing
+      // to rely on a default for.
+      algorithms: ['RS256'],
     });
     if (typeof payload.email === 'string') return payload.email;
     if (typeof payload.common_name === 'string') return `svc:${payload.common_name}`;
     return null;
-  } catch {
+  } catch (err) {
+    // Logged, because an expired token and a JWKS outage are both 401s and were
+    // previously indistinguishable to an operator.
+    console.warn('access: jwt rejected:', err instanceof Error ? err.message : err);
     return null;
   }
 }

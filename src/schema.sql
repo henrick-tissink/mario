@@ -68,6 +68,7 @@ CREATE TABLE findings (
   seen_count   INTEGER NOT NULL DEFAULT 1,
   status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
   close_note   TEXT,
+  closed_by    TEXT,                       -- who closed it; a silent close is untraceable
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL,
   closed_at    INTEGER

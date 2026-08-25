@@ -82,7 +82,7 @@ export function buildServer(db: DB, cfg: Config, actor: string): McpServer {
       const c = check(db, cfg, actor, { repo, project });
       if (!c.project) return text('no such project, or it is out of scope');
       const row = db
-        .query<{ doc: string; updated_at: number }, [string]>(
+        .query<{ doc: string; updated_at: number }>(
           'SELECT doc, updated_at FROM state WHERE project = ?',
         )
         .get(c.project);
@@ -128,7 +128,7 @@ export function buildServer(db: DB, cfg: Config, actor: string): McpServer {
       },
     },
     async ({ id, note }) => {
-      const r = closeFinding(db, id, note ?? null);
+      const r = closeFinding(db, id, note ?? null, Date.now(), actor);
       if (r.ok) return text(`closed ${r.id.slice(0, 8)}: ${r.summary}`);
       const why = {
         'too-short': 'id must be at least 8 characters — refusing a wildcard match',

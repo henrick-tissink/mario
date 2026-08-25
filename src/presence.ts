@@ -78,13 +78,13 @@ export function presence(db: DB, cfg: Config, hours = 48): Presence {
     hours: window,
     people: [...byActor.values()].sort((a, b) => b.ts - a.ts),
     folds: db
-      .query<{ project: string; updated_at: number }, []>(
+      .query<{ project: string; updated_at: number }>(
         'SELECT project, updated_at FROM state ORDER BY updated_at DESC LIMIT 10',
       )
       .all(),
     openFindings:
       db
-        .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM findings WHERE status = 'open'")
+        .query<{ n: number }>("SELECT COUNT(*) AS n FROM findings WHERE status = 'open'")
         .get()?.n ?? 0,
   };
 }

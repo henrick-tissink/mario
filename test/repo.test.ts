@@ -84,19 +84,26 @@ describe('inScope', () => {
 
 describe('defaultProject', () => {
   test('spans owner and name, so same-named repos stay separate', () => {
-    expect(defaultProject(Rq('gitlab.com/acme/api'))).toBe('acme-api');
-    expect(defaultProject(Rq('github.com/acme-labs/api'))).toBe('acme-labs-api');
+    expect(defaultProject(Rq('gitlab.com/acme/api'))).toBe('gitlab-acme-api');
+    expect(defaultProject(Rq('github.com/acme-labs/api'))).toBe('github-acme-labs-api');
     expect(defaultProject(Rq('gitlab.com/acme/api'))).not.toBe(
       defaultProject(Rq('github.com/acme-labs/api')),
     );
   });
 
+  test('the same owner/name on two forges are DIFFERENT projects', () => {
+    // Widening identity from "last segment" to "owner + name" was not enough.
+    expect(defaultProject(Rq('github.com/acme/api'))).not.toBe(
+      defaultProject(Rq('gitlab.com/acme/api')),
+    );
+  });
+
   test('uses first and last segment for nested subgroups', () => {
-    expect(defaultProject(Rq('gitlab.com/acme/devex/mario'))).toBe('acme-mario');
+    expect(defaultProject(Rq('gitlab.com/acme/devex/mario'))).toBe('gitlab-acme-mario');
   });
 
   test('slugifies', () => {
-    expect(defaultProject(Rq('gitlab.com/Acme_Corp/Some.Repo'))).toBe('acme-corp-some-repo');
+    expect(defaultProject(Rq('gitlab.com/Acme_Corp/Some.Repo'))).toBe('gitlab-acme-corp-some-repo');
   });
 });
 

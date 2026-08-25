@@ -52,48 +52,80 @@ export function check(
   const repo = normaliseRepo(opts.repo);
   if (repo && !inScope(repo, cfg.allow)) return empty('out-of-scope');
 
-  let project = opts.project ?? null;
-  if (!project) {
+  let project: string;
+  if (opts.project) {
+    // A named project is checked for reachability ALWAYS — not only when no
+    // repo was supplied. Guarding it inside an `else if (!repo)` meant passing
+    // an in-scope repo alongside any project name walked straight past the
+    // allow-list and returned another team's presence, findings and state.
+    const repos = db
+      .query<{ repo: string }>('SELECT repo FROM repos WHERE project = ?')
+      .all(opts.project);
+    if (!repos.length) return empty(); // unknown project reveals nothing
+    if (!repos.some((r) => inScope(r.repo, cfg.allow))) return empty('out-of-scope');
+    project = opts.project;
+  } else {
     if (!repo) return empty();
     project = projectFor(db, repo, now);
-  } else if (!repo) {
-    // A bare project name is only honoured if it is one this caller could have
-    // reached through an in-scope repo.
-    const known = db
-      .query<{ n: number }, [string]>(
-        `SELECT COUNT(*) AS n FROM repos WHERE project = ?`,
-      )
-      .get(project);
-    if (!known || known.n === 0) return empty();
-    const reachable = db
-      .query<{ repo: string }, [string]>(`SELECT repo FROM repos WHERE project = ?`)
-      .all(project)
-      .some((r) => inScope(r.repo as never, cfg.allow));
-    if (!reachable) return empty('out-of-scope');
   }
 
   const mine = (opts.paths ?? []).filter(Boolean);
   const myDirs = new Set(mine.map(dirOf));
 
-  const others = db
-    .query<
-      { actor: string; branch: string | null; paths: string; note: string | null; ts: number },
-      [string, string, number]
-    >(
-      `SELECT actor, branch, paths, note, MAX(ts) AS ts
+  // Every live row, NOT one per actor.
+  //
+  // The primary key is (actor, session, project), so one person legitimately
+  // holds several rows — two terminals, two worktrees, a subagent. `GROUP BY
+  // actor` kept exactly one of them, so a developer editing a file in their
+  // first session went invisible the moment their second session touched
+  // anything newer, and `check` answered `clear`. A confident false negative on
+  // the one question this tool exists to answer. Rows are merged per actor
+  // below instead, which is what "one line per person" always meant.
+  const rows = db
+    .query<{
+      actor: string;
+      session: string;
+      branch: string | null;
+      paths: string;
+      note: string | null;
+      ts: number;
+    }>(
+      `SELECT actor, session, branch, paths, note, ts
          FROM presence
         WHERE project = ? AND actor <> ? AND ts > ?
-        GROUP BY actor
         ORDER BY ts DESC
-        LIMIT 20`,
+        LIMIT 200`,
     )
     .all(project, actor, now - cfg.decayMs);
+
+  const merged = new Map<
+    string,
+    { actor: string; branch: string | null; paths: string[]; ts: number }
+  >();
+  for (const r of rows) {
+    const e = merged.get(r.actor);
+    if (!e) {
+      merged.set(r.actor, {
+        actor: r.actor,
+        branch: r.branch,
+        paths: parsePaths(r.paths),
+        ts: r.ts,
+      });
+      continue;
+    }
+    // Rows arrive newest-first, so the first row seen sets `ts`, and `branch`
+    // comes from the newest row that actually carries one — a `touch` carries
+    // none and is usually the newest.
+    e.paths.push(...parsePaths(r.paths));
+    e.branch ??= r.branch;
+  }
+  const others = [...merged.values()];
 
   const hot: CheckResult['collisions'] = [];
   const warm: CheckResult['collisions'] = [];
 
   for (const row of others) {
-    const theirs = [...new Set(parsePaths(row.paths))];
+    const theirs = [...new Set(row.paths)];
     const theirDirs = [...new Set(theirs.map(dirOf))];
 
     const exact = theirs.filter((p) => mine.includes(p));
@@ -138,7 +170,7 @@ export function check(
     collisions,
     findings,
     state:
-      db.query<{ doc: string }, [string]>('SELECT doc FROM state WHERE project = ?').get(project)
+      db.query<{ doc: string }>('SELECT doc FROM state WHERE project = ?').get(project)
         ?.doc?.split('\n')[0]
         ?.trim() || null,
     clear: collisions.length === 0 && findings.length === 0,
@@ -160,7 +192,7 @@ export function relevantFindings(
 ): CheckResult['findings'] {
   const rows = dirs.length
     ? db
-        .query<{ id: string; summary: string; seen_count: number }, [string, string, number]>(
+        .query<{ id: string; summary: string; seen_count: number }>(
           `SELECT id, summary, seen_count FROM findings f
             WHERE f.project = ? AND f.status = 'open'
               AND EXISTS (
@@ -171,7 +203,7 @@ export function relevantFindings(
         )
         .all(project, JSON.stringify(dirs.map(likePrefix)), limit)
     : db
-        .query<{ id: string; summary: string; seen_count: number }, [string, number]>(
+        .query<{ id: string; summary: string; seen_count: number }>(
           `SELECT id, summary, seen_count FROM findings
             WHERE project = ? AND status = 'open'
             ORDER BY seen_count DESC, updated_at DESC LIMIT ?`,
@@ -180,28 +212,47 @@ export function relevantFindings(
   return rows.map((r) => ({ id: r.id, summary: r.summary, seen: r.seen_count }));
 }
 
+/**
+ * Neutralise one field for rendering.
+ *
+ * Defence in depth: `emit` already strips newlines from summaries and branches,
+ * but paths are stored as given and a filename may legally contain a newline on
+ * unix. Everything interpolated into the block below is squeezed to one line so
+ * no field can stop looking like a value and start looking like an instruction.
+ */
+function safe(s: string, max = 200): string {
+  const clean = s
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length > max ? clean.slice(0, max - 1) + '…' : clean;
+}
+
 /** The terminal rendering. Hooks read this far more often than anything wants JSON. */
 export function renderCheck(r: CheckResult, now = Date.now()): string {
   if (r.skipped === 'out-of-scope') return 'out of scope — this repo does not emit';
   const lines: string[] = [];
   for (const c of r.collisions) {
     const when = ago(c.ts, now);
-    const branch = c.branch ? `, ${c.branch}` : '';
-    const who = shortName(c.actor);
+    const branch = c.branch ? `, ${safe(c.branch, 60)}` : '';
+    const who = safe(shortName(c.actor), 40);
     if (c.heat === 'hot') {
       const more = c.files.length > 1 ? ` (+${c.files.length - 1} more)` : '';
-      lines.push(`! ${who} is editing ${c.files[0]}${more} — ${when}${branch}`);
+      lines.push(`! ${who} is editing ${safe(c.files[0]!)}${more} — ${when}${branch}`);
     } else if (c.dirs.length && c.files.length) {
-      lines.push(`~ ${who} active in ${c.dirs[0]} (${c.files.length} files) — ${when}${branch}`);
+      lines.push(`~ ${who} active in ${safe(c.dirs[0]!)} (${c.files.length} files) — ${when}${branch}`);
     } else if (c.dirs.length) {
-      lines.push(`~ ${who} active in ${c.dirs.join(', ')} — ${when}${branch}`);
+      lines.push(`~ ${who} active in ${safe(c.dirs.map((d) => safe(d, 60)).join(', '))} — ${when}${branch}`);
     } else {
       lines.push(`~ ${who} active — ${when}${branch}`);
     }
   }
   for (const f of r.findings) {
-    lines.push(`o open finding${f.seen > 1 ? ` x${f.seen}` : ''}: ${f.summary} [${f.id.slice(0, 8)}]`);
+    lines.push(
+      `o open finding${f.seen > 1 ? ` x${f.seen}` : ''}: ${safe(f.summary, 300)} [${f.id.slice(0, 8)}]`,
+    );
   }
   const body = lines.length ? lines.join('\n') : 'clear';
-  return r.state ? `${body}\n(state: ${r.state})` : body;
+  return r.state ? `${body}\n(state: ${safe(r.state, 300)})` : body;
 }

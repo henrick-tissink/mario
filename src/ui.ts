@@ -14,17 +14,6 @@ export function escapeHtml(s: unknown): string {
   );
 }
 
-/** Tagged template that escapes every interpolation. Opt out only via `raw`. */
-export function h(strings: TemplateStringsArray, ...values: unknown[]): string {
-  return strings.reduce(
-    (out, s, i) => out + s + (i < values.length ? escapeHtml(values[i]) : ''),
-    '',
-  );
-}
-
-/** Explicitly trusted markup. Every use should be obvious on inspection. */
-export const raw = (s: string): { __html: string } => ({ __html: s });
-
 const CSS = `
 :root {
   --bg:#f7f5f2; --panel:#fffefc; --line:#e3ded6; --ink:#1f1c19; --muted:#6b635a;

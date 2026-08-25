@@ -68,13 +68,32 @@ export function isAdmin(cfg: Config, actor: string): boolean {
   return cfg.admins.includes(actor.toLowerCase());
 }
 
-/** One line, trimmed, capped. Applied at the boundary to everything a caller sends. */
+/**
+ * One line, trimmed, capped, control characters stripped.
+ *
+ * This is the boundary function for EVERY caller-supplied string that can reach
+ * another developer's agent context. It was previously applied to `summary`
+ * only, so `branch` arrived with newlines and no length bound and broke clean
+ * out of its slot in the rendered output — one token holder could plant text
+ * that the SessionStart hook fed into every other agent on the team.
+ *
+ * Newlines are the specific danger: the rendered block is line-oriented, so a
+ * newline is how attacker text stops looking like a field value and starts
+ * looking like a new instruction.
+ */
 export function oneLine(s: string | null | undefined, max: number): string | null {
-  if (!s) return null;
+  if (s === null || s === undefined) return null;
   const first = String(s)
-    .split('\n')
+    .split(/[\r\n\u2028\u2029]/)
     .map((l) => l.trim())
     .find(Boolean);
   if (!first) return null;
-  return first.length > max ? first.slice(0, max - 1).trimEnd() + '…' : first;
+  // Strip C0/C1 controls and zero-width/bidi marks, which can hide or reorder
+  // text in a terminal without appearing in its length.
+  const clean = first
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .trim();
+  if (!clean) return null;
+  return clean.length > max ? clean.slice(0, max - 1).trimEnd() + '…' : clean;
 }

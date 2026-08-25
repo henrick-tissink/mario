@@ -85,12 +85,12 @@ turn, by design.
 
 ```sh
 npm install
-npm test           # 109 tests, ~600ms
+npm test           # 139 tests
 npm start          # tsx src/index.ts
 npm run dev        # watch mode
 ```
 
-Node 22+, `better-sqlite3`, Hono. `npm run typecheck` runs `tsc --noEmit`.
+Node 22+, `better-sqlite3`, Hono. `npm run typecheck` runs `tsc --noEmit`. `docker build .` produces the deployable image; see `docs/deploy.md`.
 
 | Variable | Default | Meaning |
 |---|---|---|

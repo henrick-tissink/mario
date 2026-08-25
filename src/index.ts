@@ -3,10 +3,13 @@
 import { serve } from '@hono/node-server';
 import { open } from './db';
 import { loadConfig } from './config';
+import { preflight } from './preflight';
 import { createApp } from './http';
-import { anthropicSummariser, runLuigi } from './luigi';
+import { anthropicSummariser, runLuigiExclusive } from './luigi';
 
 const cfg = loadConfig();
+// Before open(): a misconfigured deploy should fail before it touches the volume.
+preflight(cfg);
 const db = open();
 
 if (!cfg.allow.length) {
@@ -25,7 +28,7 @@ const FOUR_HOURS = 4 * 60 * 60 * 1000;
 async function fold(): Promise<void> {
   if (!cfg.anthropicApiKey) return; // no key: events simply accumulate
   try {
-    const out = await runLuigi(db, cfg, summarise);
+    const out = await runLuigiExclusive(db, cfg, summarise);
     const folded = out.filter((o) => o.status === 'folded').length;
     if (out.length) console.log(`luigi: folded ${folded}/${out.length} project(s)`);
   } catch (err) {
@@ -44,6 +47,10 @@ const server = serve({ fetch: app.fetch, port }, (info) =>
 // cleanly so SQLite is not killed mid-write.
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, () => {
+    // A deadline, so one hung in-flight request cannot stall the drain until the
+    // platform SIGKILLs us mid-write.
+    const deadline = setTimeout(() => process.exit(1), 8000);
+    deadline.unref?.();
     server.close(() => {
       db.close();
       process.exit(0);
