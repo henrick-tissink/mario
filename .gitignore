@@ -1,0 +1,17 @@
+node_modules/
+
+# SQLite, including the WAL and shared-memory sidecars. Committing a live
+# database is how credentials and team activity leak into a repo.
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets: ANTHROPIC_API_KEY and the Access AUD live here in local dev.
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+dist/
+coverage/
