@@ -1,5 +1,8 @@
 # Mario
 
+[![CI](https://github.com/henrick-tissink/mario/actions/workflows/ci.yml/badge.svg)](https://github.com/henrick-tissink/mario/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-3c873a)](https://nodejs.org)
+
 Your agent tells the team what it's doing, so other agents don't collide with you — and so the
 defects it notices in passing don't get lost.
 
