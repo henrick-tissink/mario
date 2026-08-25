@@ -9,7 +9,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import type { DB } from './db';
-import { serialisePaths } from './db';
+import { MAX_PATH, serialisePaths } from './db';
 import type { Config } from './config';
 import { oneLine } from './config';
 import { defaultProject, inScope, normaliseRepo, type Repo } from './repo';
@@ -29,9 +29,6 @@ export interface EmitInput {
 export type EmitResult =
   | { ok: true; kind: EmitKind; project: string; id?: string; merged: boolean; seen?: number }
   | { ok: false; skipped: 'out-of-scope' | 'no-repo' | 'empty'; reason: string };
-
-/** A path is a filesystem path. Anything longer is a blob you keep forever. */
-const MAX_PATH = 512;
 
 const KINDS: readonly EmitKind[] = ['touch', 'claim', 'done', 'finding'];
 export const isEmitKind = (k: unknown): k is EmitKind =>

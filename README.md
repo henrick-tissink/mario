@@ -85,7 +85,7 @@ turn, by design.
 
 ```sh
 npm install
-npm test           # 139 tests
+npm test           # 140 tests
 npm start          # tsx src/index.ts
 npm run dev        # watch mode
 ```

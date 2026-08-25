@@ -17,6 +17,9 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/** A path is a filesystem path; anything longer is a blob you keep forever. */
+export const MAX_PATH = 512;
+
 /** Bind values: positional arguments, or a single object for named parameters. */
 export type Binds = readonly unknown[];
 
@@ -93,6 +96,7 @@ function pragmas(raw: SqliteDB): void {
 /** Ordered. Append only; never edit a shipped entry. */
 const MIGRATIONS: Array<{ name: string; sql: () => string }> = [
   { name: '001-init', sql: () => readFileSync(join(HERE, 'schema.sql'), 'utf8') },
+  { name: '002-indexes', sql: () => readFileSync(join(HERE, '002-indexes.sql'), 'utf8') },
 ];
 
 export function migrate(db: DB): string[] {
@@ -145,10 +149,25 @@ export function parsePaths(json: string | null | undefined): string[] {
   }
 }
 
-export function serialisePaths(paths: readonly string[], cap = 50): string {
+/**
+ * Element length is capped here as well as count.
+ *
+ * Count alone was not a bound: 50 x 1MB paths is a 50MB blob, which `check`
+ * re-reads and `parsePaths` on every call, and which the presence upsert
+ * re-expands with json_each on every touch. Measured — ~40-50MB of live paths in
+ * one project puts check() over its 250ms budget for every agent in that
+ * project, and one request can create that in a single row. No malice needed: a
+ * hook passing a file's CONTENTS instead of its name does it by accident.
+ *
+ * Trade-off, deliberately taken: an over-long path is truncated, so it no longer
+ * matches an exact path and degrades from a `hot` collision to a `warm` one. A
+ * slightly weaker signal on a pathological input beats an unusable one for
+ * everybody.
+ */
+export function serialisePaths(paths: readonly string[], cap = 50, maxLen = MAX_PATH): string {
   // Keep the most recent: a long session's newest files are the ones a
   // collision check cares about.
-  const seen = [...new Set(paths.filter(Boolean))];
+  const seen = [...new Set(paths.filter(Boolean).map((p) => p.slice(0, maxLen)))];
   return JSON.stringify(seen.slice(-cap));
 }
 

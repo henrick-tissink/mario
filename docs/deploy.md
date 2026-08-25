@@ -95,6 +95,35 @@ The platform used to provide these. Now you do. Ordered by what actually bites.
 10. **Fleet migration** — the endpoint URL lives in every developer's harness config. Plan a
     dual-run window and a way to see who has not migrated.
 
+## Scaling — two cliffs, measured
+
+Benchmarked at 10k / 100k / 1M / 2M / 3M events. `check()` itself is flat across
+that entire range (0.084ms), and over HTTP roughly **76% of observed check latency
+is framework and socket floor, not the database** — so micro-optimising queries
+would buy nothing. Two things genuinely break, and the dangerous one is not the
+one you would guess.
+
+**(a) Blob size — reachable today, by one request.** `paths` elements are now
+capped at 512 bytes each (`serialisePaths`). Before that cap, ~40–50MB of live
+paths in one project put `check()` over its 250ms budget *for every agent in that
+project* — and a single `POST /e` carrying 50 distinct 1MB paths creates exactly
+that in one row, with no growth in row count and nothing in the metrics looking
+unusual. No malice required: a hook passing a file's contents instead of its name
+does it by accident. `/statusz` reports `size.paths_bytes` for this reason —
+watch bytes-per-row, not rows.
+
+**(b) Event row count — around 2M events.** `check()` never slows; what breaks is
+`presence()`. There is one synchronous database connection in one process, so a
+slow `/who` blocks the event loop for every concurrent `/check`. Measured before
+`idx_events_ts`: a dashboard tab polling `/who` pushed check p99 from 5ms to
+137ms — a 27x degradation of the critical path caused by somebody's open browser
+tab. The symptom in the field is nasty: *intermittent* hook timeouts, uncorrelated
+with anyone's activity, on an endpoint whose own latency is microseconds.
+`idx_events_ts` pushes this roughly 30x further out.
+
+Nothing reclaims space — events are stamped `folded_at`, never deleted — so the
+file grows monotonically (≈1.3GB at 3M events). The index fixes latency, not size.
+
 ## Runtime
 
 Node 22+ with `better-sqlite3`. The project briefly ran on Bun and moved off it deliberately: Bun's
