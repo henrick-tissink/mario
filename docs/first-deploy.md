@@ -89,8 +89,14 @@ curl -s -o /dev/null -w '%{http_code}\n' https://mario.launchinto.space/a/nope/c
 curl -s -o /dev/null -w '%{http_code}\n' https://mario.launchinto.space/a/nope/x/y/z   # 401, not 302
 ```
 
-If that last one redirects to a login, App B's path matching is not covering
-deep URLs and every agent call will break. Fix it before onboarding anyone.
+**Answered, on this deployment, 2026-08-26:** path `a` with no wildcard DOES
+cover deep URLs. `/a/nope/x/y/z` returned 401 (Mario rejecting an unknown token)
+rather than 302 (Access intercepting). Re-test after any change to App B, since
+Cloudflare's docs do not state this guarantee.
+
+That 401 is also the end-to-end proof: it means the request reached the Worker,
+routed to the Durable Object, the object applied its migrations, and a SQL query
+ran against DO storage — not merely that DNS resolved.
 
 Then sign in at `https://mario.launchinto.space/setup`, mint your endpoint, and:
 
@@ -104,8 +110,16 @@ Finally, confirm posture is clean — this is the real cutover gate, not "the pa
 loads":
 
 ```sh
-curl -s https://mario.launchinto.space/statusz   # behind Access, so use a browser
+# /healthz, /readyz and /statusz all sit behind Access on this deployment,
+# because App A covers every path except /a. That is fine here: Workers needs no
+# external liveness probe, and keeping posture data behind SSO is the safer
+# default. Read it in a browser.
+open https://mario.launchinto.space/statusz
 ```
+
+Note this differs from the self-hosted path, where a container platform polls
+`/healthz` unauthenticated and `ops/deadman.sh` polls `/statusz`. On Workers the
+fold is an alarm with automatic backoff, so the dead-man's switch is not needed.
 `ok: true` and `warnings: []`. A warning here means the service is running and
 silently not doing its job.
 

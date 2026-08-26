@@ -38,7 +38,7 @@
     "MARIO_ADMINS": "hltissink@gmail.com",
     // From Access application A (the browser one) — NOT the /a bypass app,
     // which has its own AUD tag. Fill both in before the first deploy.
-    "MARIO_ACCESS_TEAM_DOMAIN": "",
-    "MARIO_ACCESS_AUD": ""
+    "MARIO_ACCESS_TEAM_DOMAIN": "wispy-credit-ed6a.cloudflareaccess.com",
+    "MARIO_ACCESS_AUD": "979575cf538206e82a8581954465263c2690f383e23617b77b5eac0b9da283d4"
   }
 }
