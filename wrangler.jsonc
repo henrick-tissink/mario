@@ -34,7 +34,7 @@
     // Repo prefixes permitted to emit. Allow-list: empty means nothing emits,
     // and preflight refuses to boot rather than run a service that silently
     // records nothing.
-    "MARIO_ALLOWED_REPOS": "github.com/henrick-tissink",
+    "MARIO_ALLOWED_REPOS": "github.com/henrick-tissink,github.com/oldtimerza/terminal-exit",
     "MARIO_ADMINS": "hltissink@gmail.com",
     // From Access application A (the browser one) — NOT the /a bypass app,
     // which has its own AUD tag. Fill both in before the first deploy.
