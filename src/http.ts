@@ -109,6 +109,16 @@ export function createApp(deps: Deps): Hono<Env> {
     return c.req.query('format') === 'json' ? c.json(r) : c.text(renderCheck(r));
   });
 
+  // The allow-list, so `mario setup` can configure itself.
+  //
+  // Client-side scoping is what keeps out-of-scope work off the network
+  // entirely, but the client previously had no way to LEARN the scope: a fresh
+  // install defaulted to an empty list, which fails closed, so a correctly
+  // installed CLI silently emitted nothing forever. Serving it here keeps the
+  // privacy property (the client still filters locally, before any emit) while
+  // removing the step nobody knew they had to do.
+  agent.get('/:token/scope', (c) => c.json({ allow: cfg.allow }));
+
   agent.get('/:token/who', (c) => {
     const p = presence(db, cfg, Number(c.req.query('hours') ?? 48));
     return c.req.query('format') === 'json' ? c.json(p) : c.text(renderPresence(p));

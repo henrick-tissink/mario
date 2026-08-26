@@ -158,3 +158,16 @@ test('mario close reaches a real route on the agent surface', async () => {
   expect(f.status).toBe('closed');
   expect(f.closed_by).toBe('henry@x.co');   // who closed it is recorded
 });
+
+test('the agent surface serves the scope, so a client can configure itself', async () => {
+  // A fresh install defaults to an empty allow-list, which fails closed — so
+  // without this endpoint a correctly installed CLI emits nothing, forever,
+  // silently. `mario setup` fetches this.
+  const r = await app.request(`/a/${token}/scope`);
+  expect(r.status).toBe(200);
+  expect(((await r.json()) as any).allow).toEqual(cfg.allow);
+});
+
+test('scope requires a valid endpoint like every other agent route', async () => {
+  expect((await app.request('/a/bogus/scope')).status).toBe(401);
+});

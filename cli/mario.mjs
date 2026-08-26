@@ -396,20 +396,41 @@ async function main() {
     case 'setup': {
       const url = rest.find((a) => !a.startsWith('-'));
       if (!url) throw new Error('usage: mario setup <endpoint-url> [--allow=prefix,prefix]');
+      const base = url.replace(/\/+$/, '');
       const flag = rest.find((a) => a.startsWith('--allow='));
-      const allow = flag
+
+      // Ask the server what is in scope. An explicit --allow still wins, for
+      // anyone who wants to narrow it further on their own machine.
+      let allow = flag
         ? flag.slice('--allow='.length).split(',').map((x) => x.trim()).filter(Boolean)
-        : config().allow;
+        : null;
+      if (!allow) {
+        try {
+          const res = await fetch(`${base}/scope`, { signal: AbortSignal.timeout(NET_TIMEOUT_MS) });
+          const body = await res.json();
+          allow = Array.isArray(body.allow) ? body.allow : [];
+        } catch {
+          allow = [];
+        }
+      }
+
       mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
       // The endpoint is a bearer credential. 0600, not whatever the umask says.
-      writeFileSync(CONFIG, JSON.stringify({ url: url.replace(/\/+$/, ''), allow }, null, 2) + '\n', {
-        mode: 0o600,
-      });
+      writeFileSync(CONFIG, JSON.stringify({ url: base, allow }, null, 2) + '\n', { mode: 0o600 });
       chmodSync(CONFIG, 0o600);
       console.log(`wrote ${CONFIG}`);
-      console.log(`  scope: ${allow.length ? allow.join(', ') : '(none — nothing will emit)'}`);
+      if (allow.length) {
+        console.log(`  scope: ${allow.join(', ')}`);
+      } else {
+        // Loud, because the symptom is otherwise silence forever: the CLI would
+        // refuse every emit locally and no error would reach anyone.
+        console.log('  scope: NONE — nothing will emit.');
+        console.log('  Could not reach the server, or it has no MARIO_ALLOWED_REPOS set.');
+        console.log('  Re-run `mario setup <url>` once it is reachable, or pass --allow=<prefix>.');
+      }
       return;
     }
+
     case 'scope': {
       const c = config();
       console.log(`allowed prefixes:\n  ${c.allow.join('\n  ') || '(none — nothing will emit)'}`);
