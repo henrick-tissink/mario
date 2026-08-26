@@ -6,6 +6,16 @@
   // Required for `cloudflare:workers` and the Anthropic SDK.
   "compatibility_flags": ["nodejs_compat"],
 
+  // Serve ONLY via the Access-protected custom domain.
+  //
+  // `workers_dev: false` is a security setting, not tidiness: a live
+  // <name>.<subdomain>.workers.dev URL is in Cloudflare's zone, not yours, so no
+  // Access application can be attached to it — it would be a permanently
+  // unauthenticated front door to the same Durable Object, bypassing SSO
+  // entirely.
+  "workers_dev": false,
+  "routes": [{ "pattern": "mario.launchinto.space", "custom_domain": true }],
+
   "durable_objects": {
     "bindings": [{ "name": "MARIO", "class_name": "MarioDurableObject" }]
   },
@@ -21,8 +31,13 @@
   "vars": {
     // Non-secret configuration. ANTHROPIC_API_KEY is a secret:
     //   npx wrangler secret put ANTHROPIC_API_KEY
-    "MARIO_ALLOWED_REPOS": "",
-    "MARIO_ADMINS": "",
+    // Repo prefixes permitted to emit. Allow-list: empty means nothing emits,
+    // and preflight refuses to boot rather than run a service that silently
+    // records nothing.
+    "MARIO_ALLOWED_REPOS": "github.com/henrick-tissink",
+    "MARIO_ADMINS": "hltissink@gmail.com",
+    // From Access application A (the browser one) — NOT the /a bypass app,
+    // which has its own AUD tag. Fill both in before the first deploy.
     "MARIO_ACCESS_TEAM_DOMAIN": "",
     "MARIO_ACCESS_AUD": ""
   }
