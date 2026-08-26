@@ -8,7 +8,11 @@ do not exist until step 3.
 
 ## 1. Authenticate
 
+nvm's default here is Node 20 and this project needs 22+, so use the explicit
+path (or `nvm use`, which will pick up `.nvmrc`):
+
 ```sh
+export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"
 npx wrangler login          # interactive; opens a browser
 npx wrangler whoami         # confirm the account owning launchinto.space
 ```
