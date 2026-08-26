@@ -85,12 +85,17 @@ turn, by design.
 
 ```sh
 npm install
-npm test           # 140 tests
+npm test           # 144 tests
 npm start          # tsx src/index.ts
 npm run dev        # watch mode
 ```
 
-Node 22+, `better-sqlite3`, Hono. `npm run typecheck` runs `tsc --noEmit`. `docker build .` produces the deployable image; see `docs/deploy.md`.
+Node 22+, `better-sqlite3`, Hono. `npm run typecheck` checks both backends.
+
+Mario runs on **either** a Node process or **Cloudflare Workers + a single Durable Object** —
+`npm run dev:worker` / `npm run deploy`. The same `src/` serves both; only the ~70-line driver differs
+(`src/db.ts` vs `src/db.do.ts`), because everything else was written against an interface rather than
+a database. See `docs/deploy.md`. `docker build .` produces the deployable image; see `docs/deploy.md`.
 
 | Variable | Default | Meaning |
 |---|---|---|

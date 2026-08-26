@@ -26,8 +26,11 @@ export interface Config {
   devActor?: string;
 }
 
-function num(name: string, fallback: number, min: number, max: number): number {
-  const raw = process.env[name];
+/** The environment, as data. Node passes `process.env`; a Worker passes `env`. */
+export type EnvLike = Record<string, string | undefined>;
+
+function num(env: EnvLike, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name];
   if (raw === undefined || raw.trim() === '') return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n)) throw new Error(`${name} must be a number, got ${JSON.stringify(raw)}`);
@@ -35,8 +38,8 @@ function num(name: string, fallback: number, min: number, max: number): number {
   return n;
 }
 
-function list(name: string, fallback: string[] = []): string[] {
-  const raw = process.env[name];
+function list(env: EnvLike, name: string, fallback: string[] = []): string[] {
+  const raw = env[name];
   if (raw === undefined) return fallback;
   return raw
     .split(',')
@@ -44,22 +47,22 @@ function list(name: string, fallback: string[] = []): string[] {
     .filter(Boolean);
 }
 
-export function loadConfig(): Config {
+export function loadConfig(env: EnvLike = process.env): Config {
   return {
-    decayMs: num('MARIO_DECAY_MINUTES', 120, 1, 60 * 24 * 7) * 60_000,
+    decayMs: num(env, 'MARIO_DECAY_MINUTES', 120, 1, 60 * 24 * 7) * 60_000,
     // Allow-list, not deny-list: an org nobody has considered is out, not in.
     // Defaulting to empty means a misconfigured deployment emits nothing rather
     // than everything.
-    allow: list('MARIO_ALLOWED_REPOS'),
-    stateMaxLines: num('MARIO_STATE_MAX_LINES', 15, 1, 200),
-    maxSummary: num('MARIO_MAX_SUMMARY', 280, 40, 4000),
-    maxFoldEvents: num('MARIO_MAX_FOLD_EVENTS', 500, 10, 10_000),
-    admins: list('MARIO_ADMINS').map((e) => e.toLowerCase()),
-    accessTeamDomain: process.env.MARIO_ACCESS_TEAM_DOMAIN ?? '',
-    accessAud: process.env.MARIO_ACCESS_AUD ?? '',
-    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-    foldModel: process.env.MARIO_FOLD_MODEL ?? 'claude-opus-5',
-    devActor: process.env.MARIO_DEV_ACTOR,
+    allow: list(env, 'MARIO_ALLOWED_REPOS'),
+    stateMaxLines: num(env, 'MARIO_STATE_MAX_LINES', 15, 1, 200),
+    maxSummary: num(env, 'MARIO_MAX_SUMMARY', 280, 40, 4000),
+    maxFoldEvents: num(env, 'MARIO_MAX_FOLD_EVENTS', 500, 10, 10_000),
+    admins: list(env, 'MARIO_ADMINS').map((e) => e.toLowerCase()),
+    accessTeamDomain: env.MARIO_ACCESS_TEAM_DOMAIN ?? '',
+    accessAud: env.MARIO_ACCESS_AUD ?? '',
+    anthropicApiKey: env.ANTHROPIC_API_KEY,
+    foldModel: env.MARIO_FOLD_MODEL ?? 'claude-opus-5',
+    devActor: env.MARIO_DEV_ACTOR,
   };
 }
 

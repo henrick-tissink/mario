@@ -21,5 +21,9 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "cli/**/*.ts"
+  ],
+  "exclude": [
+    "src/worker.ts",
+    "src/db.do.ts"
   ]
 }

@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mario",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-01",
+  // Required for `cloudflare:workers` and the Anthropic SDK.
+  "compatibility_flags": ["nodejs_compat"],
+
+  "durable_objects": {
+    "bindings": [{ "name": "MARIO", "class_name": "MarioDurableObject" }]
+  },
+
+  // `new_sqlite_classes` is what gives the object SQL storage rather than the
+  // key-value kind. It is effectively one-way — do not remove it later.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MarioDurableObject"] }
+  ],
+
+  "observability": { "enabled": true },
+
+  "vars": {
+    // Non-secret configuration. ANTHROPIC_API_KEY is a secret:
+    //   npx wrangler secret put ANTHROPIC_API_KEY
+    "MARIO_ALLOWED_REPOS": "",
+    "MARIO_ADMINS": "",
+    "MARIO_ACCESS_TEAM_DOMAIN": "",
+    "MARIO_ACCESS_AUD": ""
+  }
+}

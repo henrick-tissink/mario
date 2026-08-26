@@ -1,6 +1,60 @@
 # Deploying Mario
 
-One process, one SQLite file, behind a Cloudflare Tunnel with Access in front.
+Two backends, one codebase. Pick one:
+
+- **Cloudflare Workers + a single Durable Object** (`src/worker.ts`, `wrangler.jsonc`) — the
+  recommended path. Nothing to operate: no TLS, no disk, no log rotation, no backup script, no
+  dead-man's switch. See *Workers* below.
+- **A Node process on your own box** (`src/index.ts`, `Dockerfile`) — behind a Cloudflare Tunnel with
+  Access in front. Everything from *The operational bill* onward applies to this path only.
+
+Both run the same `src/`. The only backend-specific files are `src/db.ts` (better-sqlite3) and
+`src/db.do.ts` (Durable Object SQL), which implement one interface; all ~50 query call sites are
+shared and unaware.
+
+## Workers + a single Durable Object
+
+```sh
+npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler deploy
+```
+
+Configuration lives in `wrangler.jsonc` `vars` (`MARIO_ALLOWED_REPOS`, `MARIO_ADMINS`,
+`MARIO_ACCESS_TEAM_DOMAIN`, `MARIO_ACCESS_AUD`); the API key is a secret. `npm run dev:worker` runs it
+locally on real workerd — note that `wrangler dev --local` **persists storage between runs**, so pass
+`--persist-to` a temp directory when you want a clean database.
+
+**One object, deliberately.** `presence()` and the findings list are global by nature, so sharding per
+project would mean querying N objects and merging — reintroducing the dual-write consistency problem
+this design spent effort deleting. A single object also means single-threaded execution, so the
+remaining concurrency concerns are gone by construction: there is no `busy_timeout` to forget and no
+`BEGIN IMMEDIATE` to get wrong.
+
+**What the platform gives you for free**, all of which is hand-built work on the self-hosted path:
+managed TLS, atomic deploys, 30-day point-in-time recovery (default-on), and **alarms** — which are
+at-least-once with automatic backoff, so a failed fold retries without a monitor. `setInterval` did
+not survive a restart; an alarm does.
+
+**What it costs.** A hard **10 GB ceiling** per object, at which writes fail while reads and DELETEs
+keep working — `/statusz` reports `size.storage_bytes` and warns at 5 GB. No SSH, so debugging is
+`wrangler tail` plus what you instrumented. Single-threaded, so a pathological query queues everyone.
+
+**Two backend differences worth knowing**, both verified against real workerd rather than assumed:
+
+- **Bindings are positional only** — no `@name`, no reused `?N`. Every query uses plain `?` for this
+  reason; `test/sql.test.ts` enforces it.
+- **There are no pragmas**, so the schema's `REFERENCES` clauses are inert. Nothing relies on
+  enforcement — `luigi` inserts the parent row itself with `INSERT OR IGNORE` — but it is a real
+  difference, not a formality.
+
+`rowsWritten` was measured to match `changes` exactly (0/1/2 rows for 0/1/2 matches), which is what
+lets `revokeAllFor` and `closeFinding`'s lost-race guard work unchanged on both backends.
+
+---
+
+## Self-hosted: one process, one SQLite file
+
+Behind a Cloudflare Tunnel with Access in front.
 
 Everything in this document that says CERTAIN was verified against primary Cloudflare
 documentation; the two items marked VERIFY are five-minute tests that must be done before cutover.

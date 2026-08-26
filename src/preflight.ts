@@ -9,14 +9,14 @@
 // instead of a healthy one. `MARIO_ALLOW_UNCONFIGURED=1` downgrades them all to
 // warnings, which is what local development and a restore rehearsal want.
 
-import type { Config } from './config';
+import type { Config, EnvLike } from './config';
 
 export interface Posture {
   fatal: string[];
   warn: string[];
 }
 
-export function posture(cfg: Config, env: NodeJS.ProcessEnv = process.env): Posture {
+export function posture(cfg: Config, env: EnvLike = process.env): Posture {
   const fatal: string[] = [];
   const warn: string[] = [];
   const production = env.NODE_ENV === 'production';
@@ -69,7 +69,13 @@ export function posture(cfg: Config, env: NodeJS.ProcessEnv = process.env): Post
   return { fatal, warn };
 }
 
-export function preflight(cfg: Config, env: NodeJS.ProcessEnv = process.env): void {
+/**
+ * Throws on a fatal posture rather than exiting, because there is no
+ * `process.exit` in a Worker. The Node entry turns the throw into exit 78
+ * (EX_CONFIG) so a platform reports a failed deploy; in a Worker the throw fails
+ * object construction, which surfaces the same way in logs.
+ */
+export function preflight(cfg: Config, env: EnvLike = process.env): void {
   const { fatal, warn } = posture(cfg, env);
 
   for (const w of warn) console.warn(`mario: WARNING: ${w}`);
@@ -80,6 +86,9 @@ export function preflight(cfg: Config, env: NodeJS.ProcessEnv = process.env): vo
     console.error('mario: MARIO_ALLOW_UNCONFIGURED=1 — starting anyway. Never do this in production.');
     return;
   }
-  console.error('mario: refusing to start. Set MARIO_ALLOW_UNCONFIGURED=1 to override.');
-  process.exit(78); // EX_CONFIG
+  throw new ConfigError(fatal.join(' | '));
+}
+
+export class ConfigError extends Error {
+  override readonly name = 'ConfigError';
 }

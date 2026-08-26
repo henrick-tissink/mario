@@ -41,7 +41,7 @@ export interface Status {
     endpoints_used_7d: number;
     open_findings: number;
   };
-  size: { events: number; presence: number; paths_bytes: number };
+  size: { events: number; presence: number; paths_bytes: number; storage_bytes: number | null };
   warnings: string[];
 }
 
@@ -55,7 +55,21 @@ export function ready(db: DB): { ok: boolean; error?: string } {
   }
 }
 
-export function status(db: DB, cfg: Config, now = Date.now()): Status {
+/**
+ * Total bytes the backend reports, or null when it cannot say.
+ *
+ * A Durable Object has a HARD 10 GB ceiling at which writes fail — so unlike the
+ * self-hosted path, where a full disk is an operational failure, this is a
+ * platform limit that needs a signal long before it arrives.
+ */
+export type StorageSize = () => number | null;
+
+export function status(
+  db: DB,
+  cfg: Config,
+  now = Date.now(),
+  storageSize: StorageSize = () => null,
+): Status {
   const n = (sql: string, ...a: unknown[]) => db.query<{ n: number }>(sql).get(...a)?.n ?? 0;
   const t = (sql: string, ...a: unknown[]) =>
     db.query<{ t: number | null }>(sql).get(...a)?.t ?? null;
@@ -124,6 +138,19 @@ export function status(db: DB, cfg: Config, now = Date.now()): Status {
   if (lastEmit === null || emitAge! > QUIET_MS) {
     warnings.push('no-activity-24h: nobody has emitted anything for a day');
   }
+  const storageBytes = (() => {
+    try {
+      return storageSize();
+    } catch {
+      return null;
+    }
+  })();
+  // Half the ceiling, which at this write volume is years of warning.
+  if (storageBytes !== null && storageBytes > 5 * 1024 * 1024 * 1024) {
+    warnings.push(
+      `storage-ceiling: ${Math.round(storageBytes / 1073741824)} GB of a hard 10 GB limit`,
+    );
+  }
   if (pathsBytes > 512 * 1024 * 1024) {
     warnings.push(`paths-bloat: ${Math.round(pathsBytes / 1048576)} MB of path blobs`);
   }
@@ -153,7 +180,7 @@ export function status(db: DB, cfg: Config, now = Date.now()): Status {
       endpoints_used_7d: used7d,
       open_findings: open,
     },
-    size: { events, presence: presenceRows, paths_bytes: pathsBytes },
+    size: { events, presence: presenceRows, paths_bytes: pathsBytes, storage_bytes: storageBytes },
     warnings,
   };
 }

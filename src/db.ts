@@ -11,11 +11,7 @@
 
 import Sqlite from 'better-sqlite3';
 import type { Database as SqliteDB, Statement } from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
+import { MIGRATIONS } from './schema';
 
 /** A path is a filesystem path; anything longer is a blob you keep forever. */
 export const MAX_PATH = 512;
@@ -93,12 +89,7 @@ function pragmas(raw: SqliteDB): void {
   raw.pragma('synchronous = NORMAL');
 }
 
-/** Ordered. Append only; never edit a shipped entry. */
-const MIGRATIONS: Array<{ name: string; sql: () => string }> = [
-  { name: '001-init', sql: () => readFileSync(join(HERE, 'schema.sql'), 'utf8') },
-  { name: '002-indexes', sql: () => readFileSync(join(HERE, '002-indexes.sql'), 'utf8') },
-];
-
+/** Shared by both backends: the Node driver and the Durable Object one. */
 export function migrate(db: DB): string[] {
   db.exec(`CREATE TABLE IF NOT EXISTS migrations (
     name TEXT PRIMARY KEY,
@@ -117,7 +108,7 @@ export function migrate(db: DB): string[] {
         .query<{ n: number }>('SELECT COUNT(*) AS n FROM migrations WHERE name = ?')
         .get(m.name);
       if (done && done.n > 0) return;
-      db.exec(m.sql());
+      db.exec(m.sql);
       db.query('INSERT INTO migrations (name, applied_at) VALUES (?, ?)').run(m.name, Date.now());
       applied.push(m.name);
     }).immediate();

@@ -26,12 +26,14 @@ import { handleMcp } from './mcp';
 import { presence, renderPresence } from './presence';
 import { runLuigiExclusive, type Summariser } from './luigi';
 import { page } from './ui';
-import { ready, status } from './health';
+import { ready, status, type StorageSize } from './health';
 
 export interface Deps {
   db: DB;
   cfg: Config;
   summarise: Summariser;
+  /** Backend-specific. The Durable Object reports its size; Node does not. */
+  storageSize?: StorageSize;
 }
 
 type Env = { Variables: { actor: string } };
@@ -246,7 +248,7 @@ export function createApp(deps: Deps): Hono<Env> {
   });
 
   // Never wire this to a probe: it reports conditions a restart cannot fix.
-  app.get('/statusz', (c) => c.json(status(db, cfg)));
+  app.get('/statusz', (c) => c.json(status(db, cfg, Date.now(), deps.storageSize)));
 
   app.notFound((c) => c.text('not found', 404));
   app.onError((err, c) => {

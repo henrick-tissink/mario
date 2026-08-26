@@ -3,13 +3,19 @@
 import { serve } from '@hono/node-server';
 import { open } from './db';
 import { loadConfig } from './config';
-import { preflight } from './preflight';
+import { ConfigError, preflight } from './preflight';
 import { createApp } from './http';
 import { anthropicSummariser, runLuigiExclusive } from './luigi';
 
 const cfg = loadConfig();
 // Before open(): a misconfigured deploy should fail before it touches the volume.
-preflight(cfg);
+try {
+  preflight(cfg);
+} catch (err) {
+  if (!(err instanceof ConfigError)) throw err;
+  console.error('mario: refusing to start. Set MARIO_ALLOW_UNCONFIGURED=1 to override.');
+  process.exit(78); // EX_CONFIG
+}
 const db = open();
 
 if (!cfg.allow.length) {

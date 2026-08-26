@@ -11,7 +11,7 @@
 // endpoint must never be shared: it does not fail, it silently attributes the
 // sharer's work to the person it was minted for.
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { DB } from './db';
 import type { Config } from './config';
@@ -23,7 +23,13 @@ export function hashToken(token: string): string {
 export function mintToken(): string {
   // 256 bits. "Secure by obscurity" only holds if the obscurity is real, so this
   // is not a memorable slug and never will be.
-  return randomBytes(32).toString('base64url');
+  //
+  // Web Crypto and btoa rather than Buffer: both exist natively in Node and in
+  // Workers, so this needs no compatibility shim on either backend.
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 export function issueToken(db: DB, actor: string, label: string | null = null): string {

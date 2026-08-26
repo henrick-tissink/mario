@@ -214,14 +214,17 @@ interface PresenceRow {
  * writers cannot lose each other's work.
  */
 function upsertPresence(db: DB, row: PresenceRow): boolean {
-  // Named parameters, not `?N`: `ts` is bound twice (created_at and ts) and the
-  // driver rejects reused numbered placeholders. Names also make a 20-line
-  // upsert readable, which matters more here than brevity.
+  // Plain `?` placeholders, and `ts` is simply passed twice.
+  //
+  // Not `?N` (better-sqlite3 rejects reused numbered placeholders) and not
+  // `@name` (Durable Object SQL binds positionally only). Plain positional is
+  // the one form every driver accepts, which is what keeps this file portable
+  // across the Node and Workers backends.
   const res = db
     .query<{ writes: number }>(
       `INSERT INTO presence (actor, session, project, repo, branch, agent, paths, note,
                              created_at, ts)
-            VALUES (@actor, @session, @project, @repo, @branch, @agent, @paths, @note, @ts, @ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(actor, session, project) DO UPDATE SET
             ts     = excluded.ts,
             writes = presence.writes + 1,
@@ -247,17 +250,18 @@ function upsertPresence(db: DB, row: PresenceRow): boolean {
             )
        RETURNING writes`,
     )
-    .get({
-      actor: row.actor,
-      session: row.session,
-      project: row.project,
-      repo: row.repo,
-      branch: row.branch,
-      agent: row.agent,
-      paths: serialisePaths(row.paths),
-      note: row.note,
-      ts: row.ts,
-    });
+    .get(
+      row.actor,
+      row.session,
+      row.project,
+      row.repo,
+      row.branch,
+      row.agent,
+      serialisePaths(row.paths),
+      row.note,
+      row.ts, // created_at
+      row.ts, // ts
+    );
   // A counter, not a timestamp comparison: two hook processes landing in the
   // same millisecond must still be distinguishable from a fresh row.
   return (res?.writes ?? 1) > 1;
@@ -310,7 +314,7 @@ function upsertFinding(
     .query<{ id: string; seen_count: number }>(
       `INSERT INTO findings (id, dedupe, project, repo, summary, paths, first_actor,
                              created_at, updated_at)
-            VALUES (@id, @dedupe, @project, @repo, @summary, @paths, @actor, @now, @now)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(dedupe) DO UPDATE SET
             seen_count = findings.seen_count + 1,
             updated_at = excluded.updated_at,
@@ -335,16 +339,17 @@ function upsertFinding(
             )
        RETURNING id, seen_count`,
     )
-    .get({
+    .get(
       id,
       dedupe,
-      project: f.project,
-      repo: f.repo,
-      summary: f.summary,
-      paths: serialisePaths(f.paths),
-      actor: f.actor,
-      now: f.now,
-    });
+      f.project,
+      f.repo,
+      f.summary,
+      serialisePaths(f.paths),
+      f.actor,
+      f.now, // created_at
+      f.now, // updated_at
+    );
 
   return {
     ok: true,
