@@ -1,0 +1,525 @@
+diff --git c/README.md i/README.md
+index e7da298..204a03e 100644
+--- c/README.md
++++ i/README.md
+@@ -32,14 +32,30 @@ attributes your work to whoever it was minted for.
+ `install.sh` needs **Node 22+** (or Bun — the CLI is dependency-free ESM and runs on either) and
+ resolves whichever it finds to an absolute path, so hooks fire even when a version manager isn't on
+ the hook's `PATH`. It installs the `mario` CLI into
+-`~/.local/bin`, writes `~/.config/mario/config.json` (mode 0600 — it holds a bearer credential), and
+-merges hooks into `~/.claude/settings.json` and `~/.codex/config.toml`. Both are backed up with a
+-timestamp before being touched, and re-running never overwrites an earlier backup.
++`~/.local/bin`, writes `~/.config/mario/config.json` (mode 0600 — it holds a bearer credential), merges
++hooks into `~/.claude/settings.json` and `~/.codex/config.toml`, and installs an OpenCode plugin at
++`~/.config/opencode/plugins/mario.mjs`. The Claude and Codex files are backed up with a timestamp before
++being touched, and re-running never overwrites an earlier backup.
+ 
+ **If you use Codex, there's one manual step.** Codex gates hooks behind a trust prompt and fails
+ *silently* if it hasn't been granted — no error, no log, nothing fires. Run `codex` interactively
+ once after installing and accept the prompt. Claude Code needs nothing extra.
+ 
++OpenCode loads the Mario plugin automatically. To also give it Mario's MCP tools, add your personal
++endpoint plus `/mcp` to `~/.config/opencode/opencode.json`:
++
++```json
++{
++  "mcp": {
++    "mario": {
++      "type": "remote",
++      "url": "https://your-host/a/your-personal-token/mcp",
++      "enabled": true
++    }
++  }
++}
++```
++
+ ## What gets sent
+ 
+ | When | What |
+@@ -76,10 +92,10 @@ use them.
+ 
+ ## Turning it off
+ 
+-Delete the `mario` entries from `~/.claude/settings.json` / `~/.codex/config.toml`, or just
+-`rm ~/.config/mario/config.json`. There is exactly one config file and no fallback, so removing it
+-really does stop emission. The CLI then exits 0 silently and nothing else breaks — it never fails a
+-turn, by design.
++Delete the `mario` entries from `~/.claude/settings.json` / `~/.codex/config.toml` and
++`~/.config/opencode/plugins/mario.mjs`, or just `rm ~/.config/mario/config.json`. There is exactly one
++config file and no fallback, so removing it really does stop emission. The CLI then exits 0 silently
++and nothing else breaks — it never fails a turn, by design.
+ 
+ ## Running the server
+ 
+diff --git c/cli/mario.mjs i/cli/mario.mjs
+index 4643fe8..a92dbe1 100755
+--- c/cli/mario.mjs
++++ i/cli/mario.mjs
+@@ -132,6 +132,7 @@ function groupByRepo(paths, cwd) {
+ }
+ 
+ function agentName() {
++  if (process.env.MARIO_AGENT === 'opencode') return 'opencode';
+   if (process.env.CLAUDECODE || process.env.CLAUDE_CODE_ENTRYPOINT) return 'claude';
+   if (process.env.CODEX_HOME || process.env.CODEX_SANDBOX) return 'codex';
+   return undefined;
+@@ -222,7 +223,7 @@ function pathsFromPatch(command) {
+ 
+ function pathsFromToolInput(input) {
+   if (!input || typeof input !== 'object') return [];
+-  const out = [...pathsFromPatch(input.command)];
++  const out = [...pathsFromPatch(input.command), ...pathsFromPatch(input.patchText)];
+   for (const k of ['file_path', 'path', 'notebook_path', 'filePath']) {
+     if (typeof input[k] === 'string') out.push(input[k]);
+   }
+diff --git c/cli/opencode-plugin.d.mts i/cli/opencode-plugin.d.mts
+new file mode 100644
+index 0000000..e769dfa
+--- /dev/null
++++ i/cli/opencode-plugin.d.mts
+@@ -0,0 +1,3 @@
++export const MarioPlugin: (input: Record<string, unknown>) => Promise<
++  Record<string, (...args: any[]) => Promise<void>>
++>;
+diff --git c/cli/opencode-plugin.mjs i/cli/opencode-plugin.mjs
+new file mode 100644
+index 0000000..19b32e0
+--- /dev/null
++++ i/cli/opencode-plugin.mjs
+@@ -0,0 +1,115 @@
++// Mario's OpenCode adapter. OpenCode runs local plugins under Bun, while the
++// shared Mario hook client remains dependency-free ESM under Node or Bun.
++
++const WRITE_TOOLS = new Set(['edit', 'write', 'apply_patch']);
++
++function data(result) {
++  return result?.data ?? result;
++}
++
++function firstLine(parts) {
++  for (const part of parts ?? []) {
++    if (part?.type !== 'text' || typeof part.text !== 'string') continue;
++    const line = part.text.split('\n').find((value) => value.trim());
++    if (line) return line.trim();
++  }
++  return '';
++}
++
++function toolInput(tool, args) {
++  if (!args || typeof args !== 'object') return null;
++  if (tool === 'apply_patch') {
++    return typeof args.patchText === 'string' ? { patchText: args.patchText } : null;
++  }
++  return typeof args.filePath === 'string' ? { filePath: args.filePath } : null;
++}
++
++async function runHook(cwd, event, capture = false) {
++  const cmd = process.env.MARIO_BIN || `${process.env.HOME}/.local/bin/mario`;
++  const child = Bun.spawn([cmd, 'hook'], {
++    cwd,
++    env: { ...process.env, MARIO_AGENT: 'opencode' },
++    stdin: new Blob([JSON.stringify(event)]),
++    stdout: capture ? 'pipe' : 'ignore',
++    stderr: 'ignore',
++  });
++
++  if (!capture) {
++    void child.exited.catch(() => {});
++    return null;
++  }
++
++  const output = await new Response(child.stdout).text();
++  await child.exited;
++  try {
++    return JSON.parse(output);
++  } catch {
++    return null;
++  }
++}
++
++export const MarioPlugin = async ({ client, directory, worktree }) => {
++  const emitted = new Set();
++  const cwd = directory || worktree;
++
++  return {
++    // This hook runs before OpenCode persists the incoming message or starts the
++    // model. Adding the context to its parts makes it available on the first turn.
++    'chat.message': async (input, output) => {
++      try {
++        const messages = data(await client.session.messages({ path: { id: input.sessionID } }));
++        if (messages.some((message) => message?.info?.role === 'user')) return;
++        const result = await runHook(cwd, {
++          hook_event_name: 'SessionStart',
++          cwd,
++          session_id: input.sessionID,
++        }, true);
++        const context = result?.hookSpecificOutput?.additionalContext;
++        if (typeof context === 'string' && context) {
++          output.parts.unshift({ type: 'text', text: context, synthetic: true });
++        }
++      } catch {
++        // Startup coordination is advisory. A broken sidecar must not block chat.
++      }
++    },
++
++    'tool.execute.after': async (input) => {
++      if (!WRITE_TOOLS.has(input.tool)) return;
++      const inputForMario = toolInput(input.tool, input.args);
++      if (!inputForMario) return;
++      try {
++        void runHook(cwd, {
++          hook_event_name: 'PostToolUse',
++          cwd,
++          session_id: input.sessionID,
++          tool_input: inputForMario,
++        }).catch(() => {});
++      } catch {
++        // Bun can throw before a child is created (for example, if Mario was removed).
++      }
++    },
++
++    event: async ({ event }) => {
++      if (event.type !== 'session.idle') return;
++      try {
++        const session = event.properties.sessionID;
++        const messages = data(await client.session.messages({ path: { id: session } }));
++        const latest = [...messages]
++          .reverse()
++          .find((message) => message?.info?.role === 'assistant' && !message.info.error);
++        if (!latest || emitted.has(latest.info.id)) return;
++        const summary = firstLine(latest.parts);
++        if (!summary) return;
++        emitted.add(latest.info.id);
++        void runHook(cwd, {
++          hook_event_name: 'SessionEnd',
++          cwd,
++          session_id: session,
++          last_assistant_message: summary,
++        }).catch(() => {});
++      } catch {
++        // Idle notifications are never allowed to affect an OpenCode session.
++      }
++    },
++  };
++};
+diff --git c/docs/agent-rules.md i/docs/agent-rules.md
+index 0e9819a..66729f0 100644
+--- c/docs/agent-rules.md
++++ i/docs/agent-rules.md
+@@ -4,8 +4,9 @@ Hooks cover the mechanical half — presence, file touches, turn completion. The
+ judgment: whether something you noticed is worth recording, or whether you should look before you
+ start. That's this block.
+ 
+-Paste it into your repo's `CLAUDE.md`, or into your personal `~/.claude/CLAUDE.md` to get it
+-everywhere. The same text goes in `AGENTS.md` if you also run Codex.
++Paste it into your repo's `AGENTS.md`, or into your personal `~/.config/opencode/AGENTS.md` to get it
++everywhere in OpenCode. Claude Code uses the same text in `CLAUDE.md` or `~/.claude/CLAUDE.md`; Codex
++also reads `AGENTS.md`.
+ 
+ ---
+ 
+diff --git c/install.sh i/install.sh
+index deff47c..79fcaff 100755
+--- c/install.sh
++++ i/install.sh
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env bash
+-# Installs the mario CLI and wires it into Claude Code and Codex.
++# Installs the mario CLI and wires it into Claude Code, Codex, and OpenCode.
+ #
+ # Idempotent, and safe to re-run. Three things the previous generation of this
+ # script got wrong, fixed here:
+@@ -47,6 +47,14 @@ printf '#!/bin/sh\nexec %s %s "$@"\n' "$(printf %q "$RUNTIME")" "$(printf %q "$C
+ chmod +x "$BIN/mario"
+ echo "✓ CLI at $BIN/mario"
+ 
++# OpenCode auto-loads plugins from this directory. This is Mario's own file, so
++# replacing it on re-install cannot modify a user's config or other plugins.
++OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
++mkdir -p "$OPENCODE_PLUGIN_DIR"
++cp "$REPO/cli/opencode-plugin.mjs" "$OPENCODE_PLUGIN_DIR/mario.mjs"
++chmod 644 "$OPENCODE_PLUGIN_DIR/mario.mjs"
++echo "✓ OpenCode plugin at $OPENCODE_PLUGIN_DIR/mario.mjs"
++
+ case ":$PATH:" in
+   *":$BIN:"*) ;;
+   *) echo "  ! $BIN is not on your PATH — add it to your shell profile" ;;
+diff --git c/src/emit.ts i/src/emit.ts
+index 0d069f7..33e4795 100644
+--- c/src/emit.ts
++++ i/src/emit.ts
+@@ -23,7 +23,7 @@ export interface EmitInput {
+   repo?: string | null;
+   branch?: string | null;
+   session?: string | null;
+-  agent?: 'claude' | 'codex' | null;
++  agent?: 'claude' | 'codex' | 'opencode' | null;
+ }
+ 
+ export type EmitResult =
+@@ -113,7 +113,10 @@ export function emit(
+   // through oneLine, not just `summary`. Branch names are attacker-controlled
+   // and were previously stored raw.
+   const summary = oneLine(input.summary, cfg.maxSummary);
+-  const agent = input.agent === 'claude' || input.agent === 'codex' ? input.agent : null;
++  const agent =
++    input.agent === 'claude' || input.agent === 'codex' || input.agent === 'opencode'
++      ? input.agent
++      : null;
+   const branch = oneLine(input.branch, 200);
+ 
+   switch (input.kind) {
+diff --git c/src/mcp.ts i/src/mcp.ts
+index 54cb395..acd5446 100644
+--- c/src/mcp.ts
++++ i/src/mcp.ts
+@@ -55,7 +55,7 @@ export function buildServer(db: DB, cfg: Config, actor: string): McpServer {
+         paths: z.array(z.string()).optional(),
+         branch: z.string().optional(),
+         session: z.string().optional(),
+-        agent: z.enum(['claude', 'codex']).optional(),
++        agent: z.enum(['claude', 'codex', 'opencode']).optional(),
+       },
+     },
+     async (a) => {
+diff --git c/src/schema.ts i/src/schema.ts
+index e0edec7..321ad37 100644
+--- c/src/schema.ts
++++ i/src/schema.ts
+@@ -75,7 +75,7 @@ CREATE TABLE presence (
+   project     TEXT NOT NULL,
+   repo        TEXT,
+   branch      TEXT,
+-  agent       TEXT,                      -- claude | codex | null
++  agent       TEXT,                      -- claude | codex | opencode | null
+   paths       TEXT NOT NULL DEFAULT '[]',-- JSON array, most-recent-last
+   note        TEXT,                      -- optional one-line claim
+   created_at  INTEGER NOT NULL,          -- set on insert only; never refreshed
+diff --git c/test/emit.test.ts i/test/emit.test.ts
+index 5b95052..433ed75 100644
+--- c/test/emit.test.ts
++++ i/test/emit.test.ts
+@@ -86,6 +86,17 @@ describe('presence', () => {
+     expect(b.ok && b.merged).toBe(true);
+   });
+ 
++  test('records OpenCode attribution', () => {
++    emit(db, cfg, 'h@x.co', {
++      kind: 'touch',
++      session: 's',
++      repo: REPO,
++      paths: ['src/a.ts'],
++      agent: 'opencode',
++    });
++    expect(rows<{ agent: string }>('SELECT agent FROM presence')[0]!.agent).toBe('opencode');
++  });
++
+   test('a touch without a session is refused rather than given a fake key', () => {
+     const r = emit(db, cfg, 'h@x.co', { kind: 'touch', repo: REPO, paths: ['x'] });
+     expect(r.ok).toBe(false);
+diff --git c/test/hook.test.ts i/test/hook.test.ts
+index 10c576a..bbdae9a 100644
+--- c/test/hook.test.ts
++++ i/test/hook.test.ts
+@@ -2,8 +2,9 @@
+ // agent's turn begins. These assert the two properties that make a single-box
+ // deployment defensible: it never blocks, and it never fails a turn.
+ import { expect, test } from 'vitest';
+-import { spawn } from 'node:child_process';
++import { execFileSync, spawn } from 'node:child_process';
+ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
++import { createServer } from 'node:http';
+ import { tmpdir } from 'node:os';
+ import { join } from 'node:path';
+ 
+@@ -19,11 +20,11 @@ function fakeHome(url: string) {
+   return home;
+ }
+ 
+-function runHook(home: string, event: unknown) {
++function runHook(home: string, event: unknown, env: NodeJS.ProcessEnv = {}) {
+   const t0 = Date.now();
+   return new Promise<{ code: number; out: string; err: string; ms: number }>((resolve) => {
+     const proc = spawn(process.execPath, [CLI, 'hook'], {
+-      env: { ...process.env, HOME: home },
++      env: { ...process.env, ...env, HOME: home },
+     });
+     let out = '';
+     let err = '';
+@@ -34,6 +35,26 @@ function runHook(home: string, event: unknown) {
+   });
+ }
+ 
++async function emitFromHook(event: unknown, env?: NodeJS.ProcessEnv) {
++  let emitted: unknown;
++  const server = createServer((req, res) => {
++    let body = '';
++    req.on('data', (chunk) => (body += chunk));
++    req.on('end', () => {
++      emitted = JSON.parse(body);
++      res.setHeader('content-type', 'application/json');
++      res.end(JSON.stringify({ results: [{ ok: true }] }));
++    });
++  });
++  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
++  const address = server.address();
++  if (!address || typeof address === 'string') throw new Error('test server did not bind a port');
++  const home = fakeHome(`http://127.0.0.1:${address.port}/a/tok`);
++  const result = await runHook(home, event, env);
++  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
++  return { emitted, result };
++}
++
+ test('an unreachable server does not block the turn', async () => {
+   // Port 9 (discard) — connections hang or are refused, never answered.
+   const home = fakeHome('http://127.0.0.1:9/a/tok');
+@@ -58,3 +79,32 @@ test('a malformed hook event is survivable', async () => {
+   expect(r.code).toBe(0);
+   expect(r.err).toBe('');
+ }, 10_000);
++
++test('OpenCode patch events report paths and OpenCode attribution', async () => {
++  const repo = mkdtempSync(join(tmpdir(), 'mario-repo-'));
++  mkdirSync(join(repo, 'src'));
++  execFileSync('git', ['init', repo], { stdio: 'ignore' });
++  execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'git@gitlab.com:acme/widgets.git']);
++
++  const { emitted, result } = await emitFromHook(
++    {
++      hook_event_name: 'PostToolUse',
++      cwd: repo,
++      session_id: 'open-session',
++      tool_input: {
++        patchText: '*** Begin Patch\n*** Update File: src/cart.ts\n*** End Patch',
++      },
++    },
++    { MARIO_AGENT: 'opencode' },
++  );
++
++  expect(result.code).toBe(0);
++  expect(emitted).toEqual([
++    expect.objectContaining({
++      kind: 'touch',
++      session: 'open-session',
++      agent: 'opencode',
++      paths: ['src/cart.ts'],
++    }),
++  ]);
++});
+diff --git c/test/opencode-plugin.test.ts i/test/opencode-plugin.test.ts
+new file mode 100644
+index 0000000..b47e5fb
+--- /dev/null
++++ i/test/opencode-plugin.test.ts
+@@ -0,0 +1,111 @@
++import { afterEach, beforeEach, expect, test, vi } from 'vitest';
++
++// OpenCode loads this file under Bun. The production plugin has no package
++// dependency, so a small Bun process stub is enough to test its boundary.
++const { MarioPlugin } = await import('../cli/opencode-plugin.mjs');
++
++type SpawnCall = {
++  cmd: string[];
++  options: { cwd: string; stdin: Blob; stdout: string; env: Record<string, string | undefined> };
++};
++
++const encoder = new TextEncoder();
++const stream = (text = '') =>
++  new ReadableStream<Uint8Array>({
++    start(controller) {
++      controller.enqueue(encoder.encode(text));
++      controller.close();
++    },
++  });
++
++let calls: SpawnCall[];
++let originalBun: unknown;
++let originalMarioBin: string | undefined;
++
++beforeEach(() => {
++  calls = [];
++  originalBun = (globalThis as { Bun?: unknown }).Bun;
++  originalMarioBin = process.env.MARIO_BIN;
++  process.env.MARIO_BIN = '/tmp/mario';
++  (globalThis as { Bun?: unknown }).Bun = {
++    spawn: vi.fn((cmd: string[], options: SpawnCall['options']) => {
++      calls.push({ cmd, options });
++      return { stdout: stream(), exited: Promise.resolve(0) };
++    }),
++  };
++});
++
++afterEach(() => {
++  (globalThis as { Bun?: unknown }).Bun = originalBun;
++  if (originalMarioBin === undefined) delete process.env.MARIO_BIN;
++  else process.env.MARIO_BIN = originalMarioBin;
++});
++
++const payload = async (at = 0) => JSON.parse(await calls[at]!.options.stdin.text());
++
++test('injects Mario context into the first OpenCode message', async () => {
++  (globalThis as { Bun?: { spawn: ReturnType<typeof vi.fn> } }).Bun!.spawn.mockImplementationOnce(
++    (cmd: string[], options: SpawnCall['options']) => {
++      calls.push({ cmd, options });
++      return {
++        stdout: stream(JSON.stringify({ hookSpecificOutput: { additionalContext: '<mario-activity>data</mario-activity>' } })),
++        exited: Promise.resolve(0),
++      };
++    },
++  );
++  const client = { session: { messages: vi.fn().mockResolvedValue({ data: [] }) } };
++  const hooks = await MarioPlugin({ client, directory: '/repo', worktree: '/repo' });
++  const output = { parts: [{ type: 'text', text: 'Fix the bug' }] };
++
++  await hooks['chat.message']!({ sessionID: 's1' }, output);
++
++  expect(output.parts[0]).toMatchObject({ type: 'text', text: '<mario-activity>data</mario-activity>' });
++  expect(await payload()).toMatchObject({ hook_event_name: 'SessionStart', cwd: '/repo', session_id: 's1' });
++  expect(calls[0]!.options.env.MARIO_AGENT).toBe('opencode');
++});
++
++test('reports only OpenCode write tools and preserves apply_patch payloads', async () => {
++  const client = { session: { messages: vi.fn() } };
++  const hooks = await MarioPlugin({ client, directory: '/repo', worktree: '/repo' });
++
++  await hooks['tool.execute.after']!({ tool: 'read', sessionID: 's1', args: { filePath: 'src/a.ts' } }, {});
++  await hooks['tool.execute.after']!({ tool: 'edit', sessionID: 's1', args: { filePath: 'src/a.ts' } }, {});
++  await hooks['tool.execute.after']!({
++    tool: 'apply_patch',
++    sessionID: 's1',
++    args: { patchText: '*** Begin Patch\n*** Update File: src/b.ts\n*** End Patch' },
++  }, {});
++
++  expect(calls).toHaveLength(2);
++  expect(await payload(0)).toMatchObject({
++    hook_event_name: 'PostToolUse',
++    session_id: 's1',
++    tool_input: { filePath: 'src/a.ts' },
++  });
++  expect(await payload(1)).toMatchObject({
++    tool_input: { patchText: '*** Begin Patch\n*** Update File: src/b.ts\n*** End Patch' },
++  });
++});
++
++test('emits one completion for the latest successful assistant response', async () => {
++  const client = {
++    session: {
++      messages: vi.fn().mockResolvedValue({
++        data: [
++          { info: { id: 'a1', role: 'assistant' }, parts: [{ type: 'text', text: 'Finished the fix.\nMore detail.' }] },
++        ],
++      }),
++    },
++  };
++  const hooks = await MarioPlugin({ client, directory: '/repo', worktree: '/repo' });
++
++  await hooks.event!({ event: { type: 'session.idle', properties: { sessionID: 's1' } } });
++  await hooks.event!({ event: { type: 'session.idle', properties: { sessionID: 's1' } } });
++
++  expect(calls).toHaveLength(1);
++  expect(await payload()).toMatchObject({
++    hook_event_name: 'SessionEnd',
++    session_id: 's1',
++    last_assistant_message: 'Finished the fix.',
++  });
++});

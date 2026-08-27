@@ -132,6 +132,7 @@ function groupByRepo(paths, cwd) {
 }
 
 function agentName() {
+  if (process.env.MARIO_AGENT === 'opencode') return 'opencode';
   if (process.env.CLAUDECODE || process.env.CLAUDE_CODE_ENTRYPOINT) return 'claude';
   if (process.env.CODEX_HOME || process.env.CODEX_SANDBOX) return 'codex';
   return undefined;
@@ -222,7 +223,7 @@ function pathsFromPatch(command) {
 
 function pathsFromToolInput(input) {
   if (!input || typeof input !== 'object') return [];
-  const out = [...pathsFromPatch(input.command)];
+  const out = [...pathsFromPatch(input.command), ...pathsFromPatch(input.patchText)];
   for (const k of ['file_path', 'path', 'notebook_path', 'filePath']) {
     if (typeof input[k] === 'string') out.push(input[k]);
   }

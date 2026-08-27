@@ -2,8 +2,9 @@
 // agent's turn begins. These assert the two properties that make a single-box
 // deployment defensible: it never blocks, and it never fails a turn.
 import { expect, test } from 'vitest';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,11 +20,11 @@ function fakeHome(url: string) {
   return home;
 }
 
-function runHook(home: string, event: unknown) {
+function runHook(home: string, event: unknown, env: NodeJS.ProcessEnv = {}) {
   const t0 = Date.now();
   return new Promise<{ code: number; out: string; err: string; ms: number }>((resolve) => {
     const proc = spawn(process.execPath, [CLI, 'hook'], {
-      env: { ...process.env, HOME: home },
+      env: { ...process.env, ...env, HOME: home },
     });
     let out = '';
     let err = '';
@@ -32,6 +33,26 @@ function runHook(home: string, event: unknown) {
     proc.on('close', (code) => resolve({ code: code ?? 0, out, err, ms: Date.now() - t0 }));
     proc.stdin.end(JSON.stringify(event));
   });
+}
+
+async function emitFromHook(event: unknown, env?: NodeJS.ProcessEnv) {
+  let emitted: unknown;
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      emitted = JSON.parse(body);
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ results: [{ ok: true }] }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('test server did not bind a port');
+  const home = fakeHome(`http://127.0.0.1:${address.port}/a/tok`);
+  const result = await runHook(home, event, env);
+  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  return { emitted, result };
 }
 
 test('an unreachable server does not block the turn', async () => {
@@ -58,3 +79,32 @@ test('a malformed hook event is survivable', async () => {
   expect(r.code).toBe(0);
   expect(r.err).toBe('');
 }, 10_000);
+
+test('OpenCode patch events report paths and OpenCode attribution', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'mario-repo-'));
+  mkdirSync(join(repo, 'src'));
+  execFileSync('git', ['init', repo], { stdio: 'ignore' });
+  execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', 'git@gitlab.com:acme/widgets.git']);
+
+  const { emitted, result } = await emitFromHook(
+    {
+      hook_event_name: 'PostToolUse',
+      cwd: repo,
+      session_id: 'open-session',
+      tool_input: {
+        patchText: '*** Begin Patch\n*** Update File: src/cart.ts\n*** End Patch',
+      },
+    },
+    { MARIO_AGENT: 'opencode' },
+  );
+
+  expect(result.code).toBe(0);
+  expect(emitted).toEqual([
+    expect.objectContaining({
+      kind: 'touch',
+      session: 'open-session',
+      agent: 'opencode',
+      paths: ['src/cart.ts'],
+    }),
+  ]);
+});

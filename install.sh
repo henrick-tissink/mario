@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs the mario CLI and wires it into Claude Code and Codex.
+# Installs the mario CLI and wires it into Claude Code, Codex, and OpenCode.
 #
 # Idempotent, and safe to re-run. Three things the previous generation of this
 # script got wrong, fixed here:
@@ -46,6 +46,14 @@ mkdir -p "$BIN"
 printf '#!/bin/sh\nexec %s %s "$@"\n' "$(printf %q "$RUNTIME")" "$(printf %q "$CLI")" > "$BIN/mario"
 chmod +x "$BIN/mario"
 echo "✓ CLI at $BIN/mario"
+
+# OpenCode auto-loads plugins from this directory. This is Mario's own file, so
+# replacing it on re-install cannot modify a user's config or other plugins.
+OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugins"
+mkdir -p "$OPENCODE_PLUGIN_DIR"
+cp "$REPO/cli/opencode-plugin.mjs" "$OPENCODE_PLUGIN_DIR/mario.mjs"
+chmod 644 "$OPENCODE_PLUGIN_DIR/mario.mjs"
+echo "✓ OpenCode plugin at $OPENCODE_PLUGIN_DIR/mario.mjs"
 
 case ":$PATH:" in
   *":$BIN:"*) ;;

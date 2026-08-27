@@ -55,7 +55,7 @@ export function buildServer(db: DB, cfg: Config, actor: string): McpServer {
         paths: z.array(z.string()).optional(),
         branch: z.string().optional(),
         session: z.string().optional(),
-        agent: z.enum(['claude', 'codex']).optional(),
+        agent: z.enum(['claude', 'codex', 'opencode']).optional(),
       },
     },
     async (a) => {

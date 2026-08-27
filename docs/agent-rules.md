@@ -4,8 +4,9 @@ Hooks cover the mechanical half — presence, file touches, turn completion. The
 judgment: whether something you noticed is worth recording, or whether you should look before you
 start. That's this block.
 
-Paste it into your repo's `CLAUDE.md`, or into your personal `~/.claude/CLAUDE.md` to get it
-everywhere. The same text goes in `AGENTS.md` if you also run Codex.
+Paste it into your repo's `AGENTS.md`, or into your personal `~/.config/opencode/AGENTS.md` to get it
+everywhere in OpenCode. Claude Code uses the same text in `CLAUDE.md` or `~/.claude/CLAUDE.md`; Codex
+also reads `AGENTS.md`.
 
 ---
 

@@ -32,13 +32,29 @@ attributes your work to whoever it was minted for.
 `install.sh` needs **Node 22+** (or Bun — the CLI is dependency-free ESM and runs on either) and
 resolves whichever it finds to an absolute path, so hooks fire even when a version manager isn't on
 the hook's `PATH`. It installs the `mario` CLI into
-`~/.local/bin`, writes `~/.config/mario/config.json` (mode 0600 — it holds a bearer credential), and
-merges hooks into `~/.claude/settings.json` and `~/.codex/config.toml`. Both are backed up with a
-timestamp before being touched, and re-running never overwrites an earlier backup.
+`~/.local/bin`, writes `~/.config/mario/config.json` (mode 0600 — it holds a bearer credential), merges
+hooks into `~/.claude/settings.json` and `~/.codex/config.toml`, and installs an OpenCode plugin at
+`~/.config/opencode/plugins/mario.mjs`. The Claude and Codex files are backed up with a timestamp before
+being touched, and re-running never overwrites an earlier backup.
 
 **If you use Codex, there's one manual step.** Codex gates hooks behind a trust prompt and fails
 *silently* if it hasn't been granted — no error, no log, nothing fires. Run `codex` interactively
 once after installing and accept the prompt. Claude Code needs nothing extra.
+
+OpenCode loads the Mario plugin automatically. To also give it Mario's MCP tools, add your personal
+endpoint plus `/mcp` to `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "mario": {
+      "type": "remote",
+      "url": "https://your-host/a/your-personal-token/mcp",
+      "enabled": true
+    }
+  }
+}
+```
 
 ## What gets sent
 
@@ -76,10 +92,10 @@ use them.
 
 ## Turning it off
 
-Delete the `mario` entries from `~/.claude/settings.json` / `~/.codex/config.toml`, or just
-`rm ~/.config/mario/config.json`. There is exactly one config file and no fallback, so removing it
-really does stop emission. The CLI then exits 0 silently and nothing else breaks — it never fails a
-turn, by design.
+Delete the `mario` entries from `~/.claude/settings.json` / `~/.codex/config.toml` and
+`~/.config/opencode/plugins/mario.mjs`, or just `rm ~/.config/mario/config.json`. There is exactly one
+config file and no fallback, so removing it really does stop emission. The CLI then exits 0 silently
+and nothing else breaks — it never fails a turn, by design.
 
 ## Running the server
 
