@@ -86,6 +86,17 @@ describe('presence', () => {
     expect(b.ok && b.merged).toBe(true);
   });
 
+  test('records OpenCode attribution', () => {
+    emit(db, cfg, 'h@x.co', {
+      kind: 'touch',
+      session: 's',
+      repo: REPO,
+      paths: ['src/a.ts'],
+      agent: 'opencode',
+    });
+    expect(rows<{ agent: string }>('SELECT agent FROM presence')[0]!.agent).toBe('opencode');
+  });
+
   test('a touch without a session is refused rather than given a fake key', () => {
     const r = emit(db, cfg, 'h@x.co', { kind: 'touch', repo: REPO, paths: ['x'] });
     expect(r.ok).toBe(false);

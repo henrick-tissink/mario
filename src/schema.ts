@@ -75,7 +75,7 @@ CREATE TABLE presence (
   project     TEXT NOT NULL,
   repo        TEXT,
   branch      TEXT,
-  agent       TEXT,                      -- claude | codex | null
+  agent       TEXT,                      -- claude | codex | opencode | null
   paths       TEXT NOT NULL DEFAULT '[]',-- JSON array, most-recent-last
   note        TEXT,                      -- optional one-line claim
   created_at  INTEGER NOT NULL,          -- set on insert only; never refreshed

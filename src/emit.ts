@@ -23,7 +23,7 @@ export interface EmitInput {
   repo?: string | null;
   branch?: string | null;
   session?: string | null;
-  agent?: 'claude' | 'codex' | null;
+  agent?: 'claude' | 'codex' | 'opencode' | null;
 }
 
 export type EmitResult =
@@ -113,7 +113,10 @@ export function emit(
   // through oneLine, not just `summary`. Branch names are attacker-controlled
   // and were previously stored raw.
   const summary = oneLine(input.summary, cfg.maxSummary);
-  const agent = input.agent === 'claude' || input.agent === 'codex' ? input.agent : null;
+  const agent =
+    input.agent === 'claude' || input.agent === 'codex' || input.agent === 'opencode'
+      ? input.agent
+      : null;
   const branch = oneLine(input.branch, 200);
 
   switch (input.kind) {
